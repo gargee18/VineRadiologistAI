@@ -10,7 +10,7 @@ projection:
   projection_axis: 1
 
 deformation:
-  bend_max_angle: 15.0
+  bend_max_angle_range: [5.0, 25.0]
   bend_axis: 0
   elastic_alpha_range: [200.0, 400.0]
   elastic_sigma_range: [8.0, 12.0]

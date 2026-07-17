@@ -16,8 +16,7 @@ class ProjectionConfig:
     roll_range: Tuple[float, float] = (-10.0, 10.0)
 
     # source-to-detector distance, expressed as a relative scale factor
-    # applied to the projection (1.0 = reference distance)
-    distance_range: Tuple[float, float] = (0.6, 1.5)
+    distance_range: Tuple[float, float] = (0.7, 1.3)
 
     # Beer-Lambert attenuation
     attenuation_scale_range: Tuple[float, float] = (0.010, 0.020)

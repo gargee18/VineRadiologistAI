@@ -58,23 +58,19 @@ def elastic_deform(vol: np.ndarray, alpha: float, sigma: float,
     return map_coordinates(vol, coords, order=1, mode="reflect").reshape(shape)
 
 
-def random_bend_and_elastic(vol: np.ndarray, cfg, rng: np.random.Generator = None,
-                             field_seed: int = None) -> np.ndarray:
-    """Apply both deformations using ranges from a DeformationConfig.
-
-    Pass the same `field_seed` when calling this again on a co-registered
-    mask, so the mask gets the identical warp as the volume.
-    """
+def random_bend_and_elastic(vol, cfg, rng=None, field_seed=None):
     rng = rng or np.random.default_rng()
 
-    bent = bend_volume(vol, cfg.bend_max_angle, axis=cfg.bend_axis)
-
     if field_seed is not None:
-        alpha_rng = np.random.default_rng(field_seed)
-        alpha = alpha_rng.uniform(*cfg.elastic_alpha_range)
-        sigma = alpha_rng.uniform(*cfg.elastic_sigma_range)
+        seed_rng = np.random.default_rng(field_seed)
+        bend_angle = seed_rng.uniform(*cfg.bend_max_angle_range)
+        bent = bend_volume(vol, bend_angle, axis=cfg.bend_axis)
+        alpha = seed_rng.uniform(*cfg.elastic_alpha_range)
+        sigma = seed_rng.uniform(*cfg.elastic_sigma_range)
         return elastic_deform(bent, alpha, sigma, field_seed=field_seed)
 
+    bend_angle = rng.uniform(*cfg.bend_max_angle_range)
+    bent = bend_volume(vol, bend_angle, axis=cfg.bend_axis)
     alpha = rng.uniform(*cfg.elastic_alpha_range)
     sigma = rng.uniform(*cfg.elastic_sigma_range)
     return elastic_deform(bent, alpha, sigma, random_state=rng)
