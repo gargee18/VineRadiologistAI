@@ -1,11 +1,11 @@
 """QA visualization: reproduces the original mask-projection-overlay figures
-using the refactored vineradiology modules."""
+using the refactored VineRadiologist modules."""
 
 import argparse
 import matplotlib.pyplot as plt
 
-from vineradiology import load_specimen, generate_drr, apply_yaw
-from vineradiology.visualize import compute_mask_projs, plot_projections, plot_all_tissues_merged
+from VineRadiologist import load_specimen, generate_drr, apply_yaw
+from VineRadiologist.visualize import compute_mask_projs, plot_projections, plot_all_tissues_merged
 
 DEFAULT_ANGLES = [0, 30, 60, 90]
 

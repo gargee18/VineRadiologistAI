@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "vineradiology"
+name = "VineRadiologist"
 version = "0.1.0"
 description = "CT-to-portable-X-ray domain adaptation: synthetic radiograph generation for grapevine trunk disease detection"
 readme = "README.md"

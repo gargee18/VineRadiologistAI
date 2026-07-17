@@ -14,7 +14,7 @@ There is no practical way to get ground-truth tissue annotations on a real
    X-rays.
 
 This introduces a domain gap: no matter how the projection is done, a
-synthetic DRR is not a real X-ray. Everything in vineradiology beyond the basic
+synthetic DRR is not a real X-ray. Everything in VineRadiologist beyond the basic
 projection exists to shrink that gap.
 
 ## Why Beer-Lambert projection
@@ -32,7 +32,7 @@ detector responds to.
 
 Rotating the rigid volume (yaw/pitch) alone does not capture that real
 trunks are curved and structurally variable, not perfectly straight rigid
-bodies. `vineradiology.deform` adds:
+bodies. `VineRadiologist.deform` adds:
 
 - **Bending**: a per-slice rotation whose angle varies linearly along the
   trunk axis, approximating gradual curvature.
@@ -61,7 +61,7 @@ varies:
 
 Geometric randomization narrows the gap in pose/shape space, but the actual
 pixel statistics a model sees (noise, contrast, dynamic range) are often a
-bigger contributor to the sim-to-real gap than geometry. `vineradiology.noise`
+bigger contributor to the sim-to-real gap than geometry. `VineRadiologist.noise`
 simulates Poisson (quantum) noise, Gaussian sensor noise, and gamma/contrast
 shifts on the projected image.
 

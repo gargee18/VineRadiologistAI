@@ -2,3 +2,4 @@ xrproj_env/
 *.abi3.so
 xrproj_env/
 *.abi3.so
+test_output/

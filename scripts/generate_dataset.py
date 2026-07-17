@@ -1,6 +1,6 @@
 """
 Generate a batch of synthetic radiographs for one specimen using the
-vineradiology pipeline: elastic/bend deformation -> pose sampling
+VineRadiologist pipeline: elastic/bend deformation -> pose sampling
 (yaw/pitch/roll/distance) -> Beer-Lambert projection.
 
 With --with-masks, the same deformation and pose are also applied to the
@@ -22,7 +22,7 @@ import numpy as np
 import tifffile as tiff
 import matplotlib.pyplot as plt
 
-from vineradiology import (
+from VineRadiologist import (
     load_specimen, DEFAULT_CONFIG, random_bend_and_elastic,
     sample_pose, render_pose, render_pose_mask,
 )

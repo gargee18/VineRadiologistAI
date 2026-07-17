@@ -1,6 +1,6 @@
 import numpy as np
-from vineradiology.projection import generate_drr, apply_yaw, apply_pitch, apply_roll, apply_distance, render_pose, Pose
-from vineradiology.deform import bend_volume, elastic_deform
+from VineRadiologist.projection import generate_drr, apply_yaw, apply_pitch, apply_roll, apply_distance, render_pose, Pose
+from VineRadiologist.deform import bend_volume, elastic_deform
 
 
 def test_generate_drr_range():

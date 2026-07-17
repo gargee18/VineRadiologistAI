@@ -1,5 +1,5 @@
-# Same ranges as vineradiology.config.DEFAULT_CONFIG, kept here for reference /
-# non-Python tooling. vineradiology.config is the source of truth used at runtime.
+# Same ranges as VineRadiologist.config.DEFAULT_CONFIG, kept here for reference /
+# non-Python tooling. VineRadiologist.config is the source of truth used at runtime.
 
 projection:
   yaw_angles: [0, 30, 60, 90]

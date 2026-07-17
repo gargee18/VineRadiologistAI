@@ -1,0 +1,7 @@
+numpy
+scipy
+tifffile
+matplotlib
+
+[dev]
+pytest

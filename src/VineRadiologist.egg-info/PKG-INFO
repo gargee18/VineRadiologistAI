@@ -1,3 +1,19 @@
+Metadata-Version: 2.4
+Name: VineRadiologist
+Version: 0.1.0
+Summary: CT-to-portable-X-ray domain adaptation: synthetic radiograph generation for grapevine trunk disease detection
+License: MIT
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: numpy
+Requires-Dist: scipy
+Requires-Dist: tifffile
+Requires-Dist: matplotlib
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Dynamic: license-file
+
 # VineRadiologist
 
 CT-to-portable-X-ray domain adaptation for grapevine trunk disease detection.
