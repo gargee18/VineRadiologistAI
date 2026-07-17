@@ -1,0 +1,16 @@
+LICENSE
+README.md
+pyproject.toml
+src/xvine/__init__.py
+src/xvine/config.py
+src/xvine/deform.py
+src/xvine/io.py
+src/xvine/noise.py
+src/xvine/projection.py
+src/xvine/visualize.py
+src/xvine.egg-info/PKG-INFO
+src/xvine.egg-info/SOURCES.txt
+src/xvine.egg-info/dependency_links.txt
+src/xvine.egg-info/requires.txt
+src/xvine.egg-info/top_level.txt
+tests/test_projection.py

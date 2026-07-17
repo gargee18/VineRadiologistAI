@@ -1,0 +1,21 @@
+# Same ranges as vineradiology.config.DEFAULT_CONFIG, kept here for reference /
+# non-Python tooling. vineradiology.config is the source of truth used at runtime.
+
+projection:
+  yaw_angles: [0, 30, 60, 90]
+  pitch_range: [-30.0, 30.0]
+  roll_range: [-10.0, 10.0]
+  distance_range: [0.85, 1.15]
+  attenuation_scale_range: [0.010, 0.020]
+  projection_axis: 1
+
+deformation:
+  bend_max_angle: 15.0
+  bend_axis: 0
+  elastic_alpha_range: [200.0, 400.0]
+  elastic_sigma_range: [8.0, 12.0]
+
+noise:
+  poisson_scale_range: [0.5, 2.0]
+  gaussian_sigma_range: [0.0, 0.02]
+  gamma_range: [0.8, 1.2]
