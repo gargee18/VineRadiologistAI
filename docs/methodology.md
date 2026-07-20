@@ -57,6 +57,31 @@ varies:
   source-to-detector distance affects apparent size/blur in a real
   radiograph.
 
+### Distance baseline (from real DICOM metadata)
+
+DICOM headers from the potted greenhouse radiograph acquisitions (extracted
+via `scripts/extract_dicom_metadata.py`, `dataset/radiograph/`) give a real
+reference point:
+
+- **DistanceSourceToDetector (SID)**: ~1500mm, essentially constant across
+  every scan (a handful read 1502mm; effectively 0.1% spread)
+- **DistanceSourceToPatient (SPD)**: ~1349mm whenever present
+- Implied magnification factor: SID / SPD ≈ 1.11
+
+The greenhouse rig itself does not vary this distance scan to scan, it's a
+fixed mechanical setup. That does **not** mean field acquisition will be
+similarly fixed: a handheld portable device used directly on field vines,
+with no rig, is expected to introduce real operator-to-operator and
+scan-to-scan variation that this greenhouse data cannot measure. The
+`distance_range` multiplier in `xvine.config.ProjectionConfig` (currently
+0.85-1.15, applied around a baseline of 1.0) should be read as scaling
+around this ~1349mm SPD reference point, not as a validated field range.
+
+**Status: the reference point (1349mm SPD) is real and measured. The width
+of variation expected in actual field handheld use is still an unvalidated
+placeholder**, pending either real field acquisition data or input from
+whoever operates the device in the field.
+
 ## Why detector noise matters more than more geometry
 
 Geometric randomization narrows the gap in pose/shape space, but the actual

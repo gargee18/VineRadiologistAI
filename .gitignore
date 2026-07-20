@@ -1,7 +1,24 @@
 xrproj_env/
 *.abi3.so
-xrproj_env/
-*.abi3.so
-test_output/
 __pycache__/
 *.pyc
+*.egg-info/
+
+# generated data / images, never commit
+*.tif
+*.tiff
+*.jpg
+*.jpeg
+*.png
+*.dcm
+dataset/
+test_output/
+out/
+radiograph/
+
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.DS_Store
