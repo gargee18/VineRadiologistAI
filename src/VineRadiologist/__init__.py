@@ -7,6 +7,7 @@ from .projection import (
 )
 from .deform import bend_volume, elastic_deform, random_bend_and_elastic, deform_batch
 from .noise import add_poisson_noise, add_gaussian_noise, adjust_contrast, simulate_detector
+from .cone_beam import ConeBeamGeometry, generate_cone_beam_drr
 
 __all__ = [
     "XvineConfig", "ProjectionConfig", "DeformationConfig", "NoiseConfig", "DEFAULT_CONFIG",
