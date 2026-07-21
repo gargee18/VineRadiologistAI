@@ -58,7 +58,19 @@ def main(root, specimen, real_dir, out_plot=None):
 
     parallel = generate_drr(volume, attenuation_scale=0.015, axis=1)
 
-    geometry = ConeBeamGeometry(detector_shape=parallel.shape)
+    # Size the detector so its PHYSICAL footprint (n_pixels * pixel_spacing)
+    # actually covers the volume's real physical cross-section, not just
+    # match the voxel grid's pixel count. Using pixel count directly with
+    # the real (much finer) detector pixel spacing would zoom into a tiny
+    # patch near the center instead of showing the whole trunk.
+    voxel_spacing_mm = 0.7224
+    pixel_spacing_mm = 0.148
+    rows = int(volume.shape[0] * voxel_spacing_mm / pixel_spacing_mm)
+    cols = int(volume.shape[2] * voxel_spacing_mm / pixel_spacing_mm)
+
+    geometry = ConeBeamGeometry(detector_shape=(rows, cols),
+                                 voxel_spacing_mm=voxel_spacing_mm,
+                                 detector_pixel_spacing_mm=pixel_spacing_mm)
     cone = generate_cone_beam_drr(volume, geometry, attenuation_scale=0.015, beam_axis=1)
 
     real_pixels, n_real = load_real_pixels(real_dir)
