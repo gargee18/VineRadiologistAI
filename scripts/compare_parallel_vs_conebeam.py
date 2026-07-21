@@ -4,11 +4,18 @@ projection (generate_cone_beam_drr) on the same specimen, plus each one's
 Wasserstein distance to the real radiograph, so you can see whether
 cone-beam actually moves the synthetic distribution closer to real.
 
+Now supports custom pose (yaw/pitch/roll/distance) and attenuation_scale,
+applied identically to both projections, so you can test whether cone-beam's
+advantage shows up more at different geometries (e.g. smaller distance =
+more magnification, where cone-beam's divergent rays should matter more).
+
 Usage:
     python scripts/compare_parallel_vs_conebeam.py \
         --root /path/to/Dataset_Vitimage2019 \
         --specimen CEP011_AS1 \
         --real-dir dataset/radiograph_tif/CEP011_AS1_radio \
+        --yaw 30 --pitch 15 --roll 5 --distance 0.7 \
+        --attenuation-scale 0.02 \
         --out-plot parallel_vs_conebeam.png
 """
 
@@ -27,7 +34,9 @@ import matplotlib.pyplot as plt
 from scipy.stats import wasserstein_distance
 from PIL import Image
 
-from VineRadiologist import load_specimen, generate_drr
+from VineRadiologist import (
+    load_specimen, generate_drr, apply_yaw, apply_pitch, apply_roll, apply_distance,
+)
 from VineRadiologist.cone_beam import ConeBeamGeometry, generate_cone_beam_drr
 
 
@@ -52,17 +61,19 @@ def normalize(img):
     return (img - lo) / (hi - lo) if hi > lo else np.zeros_like(img)
 
 
-def main(root, specimen, real_dir, out_plot=None):
+def main(root, specimen, real_dir, yaw=0.0, pitch=0.0, roll=0.0, distance=1.0,
+         attenuation_scale=0.015, out_plot=None):
     data = load_specimen(root, specimen)
     volume = data["volume"]
 
-    parallel = generate_drr(volume, attenuation_scale=0.015, axis=1)
+    # apply the SAME pre-projection pose (yaw, pitch) to the volume once,
+    # so both projections see identical geometry going in
+    posed_volume = apply_pitch(apply_yaw(volume, yaw), pitch)
 
-    # Size the detector so its PHYSICAL footprint (n_pixels * pixel_spacing)
-    # actually covers the volume's real physical cross-section, not just
-    # match the voxel grid's pixel count. Using pixel count directly with
-    # the real (much finer) detector pixel spacing would zoom into a tiny
-    # patch near the center instead of showing the whole trunk.
+    parallel = generate_drr(posed_volume, attenuation_scale=attenuation_scale, axis=1)
+    parallel = apply_roll(parallel, roll)
+    parallel = apply_distance(parallel, distance)
+
     voxel_spacing_mm = 0.7224
     pixel_spacing_mm = 0.148
     rows = int(volume.shape[0] * voxel_spacing_mm / pixel_spacing_mm)
@@ -71,7 +82,9 @@ def main(root, specimen, real_dir, out_plot=None):
     geometry = ConeBeamGeometry(detector_shape=(rows, cols),
                                  voxel_spacing_mm=voxel_spacing_mm,
                                  detector_pixel_spacing_mm=pixel_spacing_mm)
-    cone = generate_cone_beam_drr(volume, geometry, attenuation_scale=0.015, beam_axis=1)
+    cone = generate_cone_beam_drr(posed_volume, geometry, attenuation_scale=attenuation_scale, beam_axis=1)
+    cone = apply_roll(cone, roll)
+    cone = apply_distance(cone, distance)
 
     real_pixels, n_real = load_real_pixels(real_dir)
     parallel_norm = normalize(parallel).ravel()
@@ -80,6 +93,7 @@ def main(root, specimen, real_dir, out_plot=None):
     w_parallel = wasserstein_distance(real_pixels, parallel_norm)
     w_cone = wasserstein_distance(real_pixels, cone_norm)
 
+    print(f"Pose: yaw={yaw} pitch={pitch} roll={roll} distance={distance} attenuation_scale={attenuation_scale}")
     print(f"Wasserstein distance (real vs PARALLEL projection): {w_parallel:.4f}")
     print(f"Wasserstein distance (real vs CONE-BEAM projection): {w_cone:.4f}")
     if w_cone < w_parallel:
@@ -103,7 +117,7 @@ def main(root, specimen, real_dir, out_plot=None):
     axes[2].legend()
     axes[2].set_title("Pixel intensity distributions")
 
-    fig.suptitle(f"{specimen}: parallel vs cone-beam vs real", fontweight="bold")
+    fig.suptitle(f"{specimen}: yaw={yaw} pitch={pitch} roll={roll} distance={distance}", fontweight="bold")
     plt.tight_layout()
 
     if out_plot:
@@ -118,6 +132,13 @@ if __name__ == "__main__":
     parser.add_argument("--root", required=True)
     parser.add_argument("--specimen", required=True)
     parser.add_argument("--real-dir", required=True)
+    parser.add_argument("--yaw", type=float, default=0.0)
+    parser.add_argument("--pitch", type=float, default=0.0)
+    parser.add_argument("--roll", type=float, default=0.0)
+    parser.add_argument("--distance", type=float, default=1.0)
+    parser.add_argument("--attenuation-scale", type=float, default=0.015)
     parser.add_argument("--out-plot", default=None)
     args = parser.parse_args()
-    main(args.root, args.specimen, args.real_dir, out_plot=args.out_plot)
+    main(args.root, args.specimen, args.real_dir,
+         yaw=args.yaw, pitch=args.pitch, roll=args.roll, distance=args.distance,
+         attenuation_scale=args.attenuation_scale, out_plot=args.out_plot)
