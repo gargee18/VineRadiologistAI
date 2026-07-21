@@ -9,13 +9,6 @@ This module implements a straightforward ray-casting cone-beam projector
 using the real acquisition geometry recovered from your DICOM metadata:
   - DistanceSourceToDetector (SID) ~= 1500mm
   - DistanceSourceToPatient (SPD)  ~= 1349mm
-
-IMPORTANT: this requires the CT volume's real voxel spacing (mm per voxel)
-to place it correctly in physical space between source and detector. If you
-don't have a confirmed value for these specific CT volumes, the default
-below is a placeholder, not a validated number, check your CT DICOM headers
-or Java registration pipeline metadata (PixelSpacing/SliceThickness) before
-trusting absolute distances/magnification from this function.
 """
 
 from dataclasses import dataclass
@@ -28,7 +21,22 @@ class ConeBeamGeometry:
     sid_mm: float = 1500.0   # source-to-detector distance
     spd_mm: float = 1349.0   # source-to-patient(volume-center) distance
     detector_pixel_spacing_mm: float = 0.148  # real value from your radiograph DICOMs
-    voxel_spacing_mm: float = 1.0  # PLACEHOLDER: confirm real CT voxel spacing before trusting absolute geometry
+
+    # IMPORTANT: this must match whichever volume you're actually projecting.
+    # The RAW CT reconstruction voxel size (from unireconstruction.xml) is
+    # ~0.1777mm isotropic, confirmed across 11/12 specimens. But registered.tif
+    # (what load_specimen/build_training_set.py actually loads) was resampled
+    # during registration to ~0.7224mm in-plane (confirmed from its own TIFF
+    # XResolution tag), roughly 4x coarser than the raw data. Using the raw
+    # 0.1777mm value against a registered.tif volume would be wrong by ~4x.
+    # Default here matches registered.tif, since that's what the pipeline
+    # actually uses. NOTE: this is confirmed for X/Y only (registered.tif's
+    # own XResolution tag). Z-spacing was never recorded in registered.tif
+    # (ImageJ shows voxel depth=1.0 as an unlabeled placeholder). Assuming
+    # isotropic Z here is an INFERENCE (the raw source was isotropic before
+    # resampling, and registration likely scaled all 3 axes uniformly), not
+    # a directly confirmed number, flag this if it matters for your results.
+    voxel_spacing_mm: float = 0.7224  # registered.tif spacing (majority group; RES specimens ~0.7145mm)
     detector_shape: tuple = (512, 512)  # (rows, cols) of the output image
 
 
@@ -43,10 +51,7 @@ def generate_cone_beam_drr(vol: np.ndarray, geometry: ConeBeamGeometry,
     `axis` convention used by generate_drr elsewhere in the package: 1).
 
     Only the portion of each ray that actually intersects the volume's
-    bounding box is sampled (not the full source-to-detector distance),
-    since most of that path is empty space between source, volume, and
-    detector, sampling all of it would waste resolution and, for a small
-    spd, could miss the volume slice entirely.
+    bounding box is sampled (not the full source-to-detector distance).
     """
     other_axes = [a for a in range(3) if a != beam_axis]
     n_beam = vol.shape[beam_axis]
