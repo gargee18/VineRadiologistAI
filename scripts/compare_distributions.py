@@ -17,11 +17,11 @@ Usage (single specimen):
         --real-dir dataset/radiograph_tif/CEP011_AS1_radio \
         --synthetic-dir dataset/train/CEP011_AS1
 
-Usage (all specimens):
+Usage (all specimens, one PNG saved per specimen):
     python scripts/compare_distributions.py \
         --real-root dataset/radiograph_tif \
         --synthetic-root dataset \
-        --out-plot all_specimens_comparison.png
+        --out-dir specimen_comparisons
 """
 
 import argparse
@@ -78,7 +78,6 @@ def find_synthetic_dir(synthetic_root, specimen):
         candidate = Path(synthetic_root) / split / specimen
         if candidate.exists():
             return candidate
-    # fall back to a flat layout: synthetic_root/<specimen>
     flat = Path(synthetic_root) / specimen
     if flat.exists():
         return flat
@@ -142,16 +141,19 @@ def run_single(real_dir, synthetic_dir, out_plot=None):
         plt.show()
 
 
-def run_all_specimens(real_root, synthetic_root, out_plot=None):
+def run_all_specimens(real_root, synthetic_root, out_plot=None, out_dir=None):
     real_root = Path(real_root)
     specimen_dirs = sorted(d for d in real_root.iterdir() if d.is_dir())
+
+    if out_dir:
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
 
     results = []
     all_real_pixels = []
     all_synth_pixels = []
 
     for real_dir in specimen_dirs:
-        # real folders are named like "CEP011_AS1_radio" — strip the suffix
         specimen = real_dir.name
         if specimen.endswith("_radio"):
             specimen = specimen[: -len("_radio")]
@@ -177,6 +179,23 @@ def run_all_specimens(real_root, synthetic_root, out_plot=None):
         all_synth_pixels.append(synth_pixels)
         print(f"{specimen}: n_real={len(real_files)} n_synth={len(synth_files)} Wasserstein={w:.4f}")
 
+        if out_dir:
+            fig, ax = plt.subplots(figsize=(8, 5))
+            bins = np.linspace(0, 1, 100)
+            ax.hist(real_pixels, bins=bins, density=True, alpha=0.5,
+                    label=f"Real (n={len(real_files)} images)", color="tab:blue")
+            ax.hist(synth_pixels, bins=bins, density=True, alpha=0.5,
+                    label=f"Synthetic (n={len(synth_files)} images)", color="tab:orange")
+            ax.set_xlabel("Normalized pixel intensity")
+            ax.set_ylabel("Density")
+            ax.set_title(f"{specimen}: real vs synthetic\nWasserstein distance = {w:.4f}")
+            ax.legend()
+            plt.tight_layout()
+            specimen_plot_path = out_dir / f"{specimen}.png"
+            plt.savefig(specimen_plot_path, dpi=150)
+            plt.close(fig)
+            print(f"  saved: {specimen_plot_path}")
+
     if not results:
         print("No matched specimens found, nothing to compare.")
         return
@@ -190,13 +209,11 @@ def run_all_specimens(real_root, synthetic_root, out_plot=None):
     print(f"\nMean Wasserstein across {len(results)} specimens: {np.mean(ws):.4f}")
     print(f"Min: {min(ws):.4f}  Max: {max(ws):.4f}")
 
-    # combined (pooled) distance across the whole dataset at once
     combined_real = np.concatenate(all_real_pixels)
     combined_synth = np.concatenate(all_synth_pixels)
     combined_w = wasserstein_distance(combined_real, combined_synth)
     print(f"\nCombined (all specimens pooled together) Wasserstein distance: {combined_w:.4f}")
 
-    # bar chart of per-specimen Wasserstein distance
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     specimens = [r[0] for r in results]
     axes[0].bar(specimens, ws, color="tab:purple")
@@ -213,7 +230,7 @@ def run_all_specimens(real_root, synthetic_root, out_plot=None):
     plt.tight_layout()
     if out_plot:
         plt.savefig(out_plot, dpi=150)
-        print(f"\nSaved plot: {out_plot}")
+        print(f"\nSaved summary plot: {out_plot}")
     else:
         plt.show()
 
@@ -224,8 +241,9 @@ if __name__ == "__main__":
     parser.add_argument("--synthetic-dir", default=None)
     parser.add_argument("--real-root", default=None, help="folder containing per-specimen real radiograph subfolders (e.g. dataset/radiograph_tif)")
     parser.add_argument("--synthetic-root", default=None, help="folder containing train/val/test splits (e.g. dataset)")
-    parser.add_argument("--out-plot", default=None, help="save plot to this path instead of showing it (useful on a headless server)")
+    parser.add_argument("--out-plot", default=None, help="save summary bar chart + combined histogram to this path")
+    parser.add_argument("--out-dir", default=None, help="save one individual histogram PNG per specimen into this folder")
     args = parser.parse_args()
     main(real_dir=args.real_dir, synthetic_dir=args.synthetic_dir,
          real_root=args.real_root, synthetic_root=args.synthetic_root,
-         out_plot=args.out_plot)
+         out_plot=args.out_plot, out_dir=args.out_dir)
