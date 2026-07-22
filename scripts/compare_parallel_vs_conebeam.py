@@ -4,7 +4,7 @@ projection (generate_cone_beam_drr) on the same specimen, plus each one's
 Wasserstein distance to the real radiograph, so you can see whether
 cone-beam actually moves the synthetic distribution closer to real.
 
-Now supports custom pose (yaw/pitch/roll/distance) and attenuation_scale,
+Supports custom pose (yaw/pitch/roll/distance) and attenuation_scale,
 applied identically to both projections, so you can test whether cone-beam's
 advantage shows up more at different geometries (e.g. smaller distance =
 more magnification, where cone-beam's divergent rays should matter more).
@@ -66,8 +66,6 @@ def main(root, specimen, real_dir, yaw=0.0, pitch=0.0, roll=0.0, distance=1.0,
     data = load_specimen(root, specimen)
     volume = data["volume"]
 
-    # apply the SAME pre-projection pose (yaw, pitch) to the volume once,
-    # so both projections see identical geometry going in
     posed_volume = apply_pitch(apply_yaw(volume, yaw), pitch)
 
     parallel = generate_drr(posed_volume, attenuation_scale=attenuation_scale, axis=1)
