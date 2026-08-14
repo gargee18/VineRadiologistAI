@@ -14,9 +14,17 @@ Usage:
         --root /path/to/Dataset_Vitimage2019 \
         --specimen CEP011_AS1 \
         --real-dir dataset/radiograph_tif/CEP011_AS1_radio \
+        --sid-mm <real measured value for this dataset> \
+        --spd-mm <real measured value for this dataset> \
         --yaw 30 --pitch 15 --roll 5 --distance 0.7 \
         --attenuation-scale 0.02 \
         --out-plot parallel_vs_conebeam.png
+
+NOTE: --sid-mm/--spd-mm are required, no default. This script previously
+omitted them entirely and silently used ConeBeamGeometry's old stale
+defaults (1500mm/1349mm), unconfirmed for Vitimage2019 acquisitions.
+Confirm the real distances for this dataset before running, don't reuse
+the CEP_378A values (1230mm/800mm), those are a different device/setup.
 """
 
 import argparse
@@ -61,7 +69,7 @@ def normalize(img):
     return (img - lo) / (hi - lo) if hi > lo else np.zeros_like(img)
 
 
-def main(root, specimen, real_dir, yaw=0.0, pitch=0.0, roll=0.0, distance=1.0,
+def main(root, specimen, real_dir, sid_mm, spd_mm, yaw=0.0, pitch=0.0, roll=0.0, distance=1.0,
          attenuation_scale=0.015, out_plot=None):
     data = load_specimen(root, specimen)
     volume = data["volume"]
@@ -77,7 +85,8 @@ def main(root, specimen, real_dir, yaw=0.0, pitch=0.0, roll=0.0, distance=1.0,
     rows = int(volume.shape[0] * voxel_spacing_mm / pixel_spacing_mm)
     cols = int(volume.shape[2] * voxel_spacing_mm / pixel_spacing_mm)
 
-    geometry = ConeBeamGeometry(detector_shape=(rows, cols),
+    geometry = ConeBeamGeometry(sid_mm=sid_mm, spd_mm=spd_mm,
+                                 detector_shape=(rows, cols),
                                  voxel_spacing_mm=voxel_spacing_mm,
                                  detector_pixel_spacing_mm=pixel_spacing_mm)
     cone = generate_cone_beam_drr(posed_volume, geometry, attenuation_scale=attenuation_scale, beam_axis=1)
@@ -130,6 +139,12 @@ if __name__ == "__main__":
     parser.add_argument("--root", required=True)
     parser.add_argument("--specimen", required=True)
     parser.add_argument("--real-dir", required=True)
+    parser.add_argument("--sid-mm", type=float, required=True,
+                         help="source-to-detector distance, mm. Real measured/DICOM-confirmed "
+                              "value for THIS dataset's acquisition setup, no default, "
+                              "the old 1500mm default was unconfirmed for Vitimage2019 specimens.")
+    parser.add_argument("--spd-mm", type=float, required=True,
+                         help="source-to-patient distance, mm. Same caveat as --sid-mm.")
     parser.add_argument("--yaw", type=float, default=0.0)
     parser.add_argument("--pitch", type=float, default=0.0)
     parser.add_argument("--roll", type=float, default=0.0)
@@ -137,6 +152,6 @@ if __name__ == "__main__":
     parser.add_argument("--attenuation-scale", type=float, default=0.015)
     parser.add_argument("--out-plot", default=None)
     args = parser.parse_args()
-    main(args.root, args.specimen, args.real_dir,
+    main(args.root, args.specimen, args.real_dir, args.sid_mm, args.spd_mm,
          yaw=args.yaw, pitch=args.pitch, roll=args.roll, distance=args.distance,
          attenuation_scale=args.attenuation_scale, out_plot=args.out_plot)
