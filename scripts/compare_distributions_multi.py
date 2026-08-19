@@ -67,6 +67,7 @@ def main(real_path, invert_real, drr_args, out_path):
     plt.xlabel("normalized intensity [0,1]")
     plt.ylabel("density")
     plt.title("Distribution comparison: real vs DRR variant(s)")
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out_path, dpi=120)
 
     print("--- stats (all normalized independently) ---")

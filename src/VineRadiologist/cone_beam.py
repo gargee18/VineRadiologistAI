@@ -47,6 +47,23 @@ class ConeBeamGeometry:
     voxel_spacing_mm: object = 0.7224  # float (isotropic) or (z, y, x) tuple
     detector_shape: tuple = (512, 512)  # (rows, cols) of the output image
 
+    # Vertical/horizontal centering offset (mm), in the DETECTOR plane,
+    # not the beam axis. Physically: the code assumes the source/detector
+    # were aimed at the volume's exact geometric center along both
+    # detector-plane axes. Real acquisitions aren't always perfectly
+    # centered (e.g. scanner aimed lower toward the pot, cutting off
+    # canopy at the top), these offsets let you shift the effective
+    # aim point without touching sid/spd (which only control distance/
+    # magnification, not vertical framing).
+    # offset_v_mm: shifts along other_axes[0] (the first non-beam axis,
+    # typically the "vertical" axis in the rendered image, e.g. Z in the
+    # CEP pipeline). offset_u_mm: shifts along other_axes[1].
+    # Sign convention isn't derived from physical geometry here, this is
+    # empirical: try a value, check if it moved the right direction, flip
+    # sign if not.
+    offset_v_mm: float = 0.0
+    offset_u_mm: float = 0.0
+
     def spacing_for_axis(self, axis: int) -> float:
         s = self.voxel_spacing_mm
         if isinstance(s, (tuple, list)):
@@ -98,8 +115,8 @@ def generate_cone_beam_drr(vol: np.ndarray, geometry: ConeBeamGeometry,
     u_coord_mm = t * det_grid_u[np.newaxis, :, :]
 
     beam_idx = beam_coord_mm / beam_spacing + n_beam / 2
-    v_idx = v_coord_mm / v_spacing + vol.shape[other_axes[0]] / 2
-    u_idx = u_coord_mm / u_spacing + vol.shape[other_axes[1]] / 2
+    v_idx = v_coord_mm / v_spacing + vol.shape[other_axes[0]] / 2 + geometry.offset_v_mm / v_spacing
+    u_idx = u_coord_mm / u_spacing + vol.shape[other_axes[1]] / 2 + geometry.offset_u_mm / u_spacing
 
     coords = [None, None, None]
     coords[beam_axis] = beam_idx

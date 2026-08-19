@@ -24,7 +24,10 @@ Distance metrics (pick with --metric):
   - "mi"           1 - normalized mutual information. Robust to nonlinear
                    intensity relationships between real and synthetic.
 
-
+NOTE: this is not yet a verified choice, the whiteboard photo you shared
+flagged this as an open question (histogram distance / SSIM / MAD / mutual
+info). ssim is a reasonable default to start iterating with, not a final
+answer, swap --metric and compare results before committing to one.
 """
 
 import argparse
@@ -51,7 +54,9 @@ from VineRadiologist.io import load_volume
 # Downsample the working grid, keeping the physical footprint (rows *
 # pixel_spacing) constant, so the geometry stays correct, just coarser.
 def make_geometry(detector_size: int = 512, voxel_spacing_mm: float = None,
-                   voxel_spacing_z_mm: float = None) -> ConeBeamGeometry:
+                   voxel_spacing_z_mm: float = None, sid_mm: float = 1230.0,
+                   spd_mm: float = 800.0, offset_v_mm: float = 0.0,
+                   offset_u_mm: float = 0.0) -> ConeBeamGeometry:
     full_res = 3072
     full_spacing = 0.139
     physical_extent_mm = full_res * full_spacing  # ~427mm, unchanged
@@ -66,12 +71,19 @@ def make_geometry(detector_size: int = 512, voxel_spacing_mm: float = None,
 
     spacing = (z, inplane, inplane)  # matches (axis0, axis1, axis2)
 
+    # sid_mm/spd_mm default to the CEP_378A/CEP_1191-confirmed values
+    # (1230/800), but these are NOT confirmed universal across specimens.
+    # Operators likely position each specimen at a different distance
+    # depending on its physical size, override with --sid-mm/--spd-mm if
+    # a specimen's DRR doesn't match its real FOV at the defaults.
     return ConeBeamGeometry(
-        sid_mm=1230.0,
-        spd_mm=800.0,
+        sid_mm=sid_mm,
+        spd_mm=spd_mm,
         detector_pixel_spacing_mm=scaled_spacing,
         detector_shape=(detector_size, detector_size),
         voxel_spacing_mm=spacing,
+        offset_v_mm=offset_v_mm,
+        offset_u_mm=offset_u_mm,
     )
 
 
@@ -222,66 +234,13 @@ def compute_distance(sim: np.ndarray, real: np.ndarray, metric: str = "ssim") ->
     raise ValueError(f"unknown metric: {metric}")
 
 
-def apply_gamma(drr: np.ndarray, gamma: float) -> np.ndarray:
-    """Tone-curve applied on top of the raw Beer-Lambert output, drr is
-    already in [0,1] by construction, so drr**gamma stays in [0,1] too.
-    gamma < 1 stretches the bright end (helps if real image has more
-    high-intensity contrast than synthetic); gamma > 1 compresses it.
-    gamma=1 is a no-op, identical to not using this at all.
-    """
-    return np.clip(drr, 0.0, 1.0) ** gamma
-
-
 def generate_fixed(vol: np.ndarray, real_img: np.ndarray, geometry: ConeBeamGeometry,
-                    attenuation_scale: float, metric: str = "ssim", beam_axis: int = 1,
-                    gamma: float = 1.0) -> dict:
+                    attenuation_scale: float, metric: str = "ssim", beam_axis: int = 1) -> dict:
     """Generate a DRR at a fixed attenuation_scale (no optimization), still
     scoring it against real_img for reference so you know how it compares."""
     drr = generate_cone_beam_drr(vol, geometry, attenuation_scale=attenuation_scale, beam_axis=beam_axis)
-    drr = apply_gamma(drr, gamma)
     dist = compute_distance(drr, real_img, metric=metric)
-    return {"attenuation_scale": attenuation_scale, "gamma": gamma, "distance": dist,
-            "metric": metric, "drr": drr}
-
-
-def calibrate_with_gamma(vol: np.ndarray, real_img: np.ndarray, geometry: ConeBeamGeometry,
-                          metric: str = "ssim", atten_bounds=(0.002, 0.2),
-                          gamma_bounds=(0.3, 2.0)) -> dict:
-    """Jointly fit (attenuation_scale, gamma) by minimizing distance. Use
-    this instead of calibrate() when a single linear scale can't match
-    the real image's contrast, e.g. if the real histogram has a fatter
-    high-intensity tail than the synthetic one (compressed dynamic range).
-    """
-    from scipy.optimize import minimize
-
-    history = []
-
-    def objective(params):
-        atten_scale, gamma = params
-        drr = generate_cone_beam_drr(vol, geometry, attenuation_scale=atten_scale)
-        drr = apply_gamma(drr, gamma)
-        dist = compute_distance(drr, real_img, metric=metric)
-        history.append((atten_scale, gamma, dist))
-        return dist
-
-    x0 = [(atten_bounds[0] + atten_bounds[1]) / 2, 1.0]
-    bounds = [atten_bounds, gamma_bounds]
-    result = minimize(objective, x0, method="L-BFGS-B", bounds=bounds,
-                       options={"eps": 1e-4})
-
-    best_atten, best_gamma = result.x
-    best_drr = apply_gamma(
-        generate_cone_beam_drr(vol, geometry, attenuation_scale=best_atten), best_gamma
-    )
-
-    return {
-        "attenuation_scale": best_atten,
-        "gamma": best_gamma,
-        "distance": result.fun,
-        "metric": metric,
-        "drr": best_drr,
-        "history": history,
-    }
+    return {"attenuation_scale": attenuation_scale, "distance": dist, "metric": metric, "drr": drr}
 
 
 def calibrate(vol: np.ndarray, real_img: np.ndarray, geometry: ConeBeamGeometry,
@@ -316,9 +275,10 @@ def calibrate(vol: np.ndarray, real_img: np.ndarray, geometry: ConeBeamGeometry,
 
 def main(xr_path, pxr_path, metric, out_drr, view=None, detector_size=512,
          voxel_spacing_mm=None, atten_bounds=(0.002, 0.2), voxel_spacing_z_mm=None,
-         fixed_attenuation=None, beam_axis=1, fit_gamma=False, gamma_bounds=(0.3, 2.0),
-         fixed_gamma=None):
-    geometry = make_geometry(detector_size, voxel_spacing_mm, voxel_spacing_z_mm)
+         fixed_attenuation=None, beam_axis=1, sid_mm=1230.0, spd_mm=800.0,
+         offset_v_mm=0.0, offset_u_mm=0.0):
+    geometry = make_geometry(detector_size, voxel_spacing_mm, voxel_spacing_z_mm, sid_mm, spd_mm,
+                              offset_v_mm, offset_u_mm)
 
     vol = load_volume(xr_path)
     if view is not None:
@@ -338,47 +298,31 @@ def main(xr_path, pxr_path, metric, out_drr, view=None, detector_size=512,
           f"(reduce --detector-size if this is too high for your machine)")
     if fixed_attenuation is not None:
         atten_values = fixed_attenuation if isinstance(fixed_attenuation, list) else [fixed_attenuation]
-        gamma_values = fixed_gamma if isinstance(fixed_gamma, list) else [fixed_gamma or 1.0]
         results = []
-        for g in gamma_values:
-            for v in atten_values:
-                r = generate_fixed(vol, real_img, geometry, v, metric=metric, beam_axis=beam_axis, gamma=g)
-                results.append(r)
-                print(f"attenuation_scale: {r['attenuation_scale']:.6f}  gamma: {r['gamma']:.6f}")
-                print(f"Distance ({metric}): {r['distance']:.6f}")
-                print()
+        for v in atten_values:
+            r = generate_fixed(vol, real_img, geometry, v, metric=metric, beam_axis=beam_axis)
+            results.append(r)
+            print(f"attenuation_scale: {r['attenuation_scale']:.6f}")
+            print(f"Distance ({metric}): {r['distance']:.6f}")
+            print()
         result = min(results, key=lambda r: r["distance"])
         if len(results) > 1:
             print(f"Best: attenuation_scale={result['attenuation_scale']:.6f}  "
-                  f"gamma={result['gamma']:.6f}  distance={result['distance']:.6f}")
+                  f"distance={result['distance']:.6f}")
     else:
-        if fit_gamma:
-            print(f"Jointly fitting (attenuation_scale, gamma) with metric={metric} ...")
-            result = calibrate_with_gamma(vol, real_img, geometry, metric=metric,
-                                           atten_bounds=atten_bounds, gamma_bounds=gamma_bounds)
-            for bound_val, bound_name, bounds_pair in [
-                (result["attenuation_scale"], "attenuation_scale", atten_bounds),
-                (result["gamma"], "gamma", gamma_bounds),
-            ]:
-                if abs(bound_val - bounds_pair[1]) < 1e-3 or abs(bound_val - bounds_pair[0]) < 1e-3:
-                    print(f"WARNING: fitted {bound_name} ({bound_val:.4f}) is pinned at a "
-                          f"search bound {bounds_pair}. Widen it and rerun before trusting this.")
-        else:
-            print(f"Fitting attenuation_scale with metric={metric} ...")
-            result = calibrate(vol, real_img, geometry, metric=metric, bounds=atten_bounds)
-            if abs(result["attenuation_scale"] - atten_bounds[1]) < 1e-4:
-                print(f"WARNING: fitted attenuation_scale ({result['attenuation_scale']:.4f}) is "
-                      f"pinned at the upper search bound ({atten_bounds[1]}). The optimizer wants "
-                      f"to go higher, raise --atten-max and rerun before trusting this result.")
-            elif abs(result["attenuation_scale"] - atten_bounds[0]) < 1e-4:
-                print(f"WARNING: fitted attenuation_scale ({result['attenuation_scale']:.4f}) is "
-                      f"pinned at the lower search bound ({atten_bounds[0]}). Lower --atten-min "
-                      f"and rerun before trusting this result.")
+        print(f"Fitting attenuation_scale with metric={metric} ...")
+        result = calibrate(vol, real_img, geometry, metric=metric, bounds=atten_bounds)
+        if abs(result["attenuation_scale"] - atten_bounds[1]) < 1e-4:
+            print(f"WARNING: fitted attenuation_scale ({result['attenuation_scale']:.4f}) is "
+                  f"pinned at the upper search bound ({atten_bounds[1]}). The optimizer wants "
+                  f"to go higher, raise --atten-max and rerun before trusting this result.")
+        elif abs(result["attenuation_scale"] - atten_bounds[0]) < 1e-4:
+            print(f"WARNING: fitted attenuation_scale ({result['attenuation_scale']:.4f}) is "
+                  f"pinned at the lower search bound ({atten_bounds[0]}). Lower --atten-min "
+                  f"and rerun before trusting this result.")
 
     if fixed_attenuation is None:
         print(f"\nattenuation_scale: {result['attenuation_scale']:.6f}")
-        if "gamma" in result:
-            print(f"gamma: {result['gamma']:.6f}")
         print(f"Distance ({metric}): {result['distance']:.6f}")
         if "history" in result:
             print(f"Iterations: {len(result['history'])}")
@@ -422,11 +366,11 @@ def sweep(vol, geometry, values, out_dir, beam_axis=1, real_img=None, metric="ss
     out_dir.mkdir(parents=True, exist_ok=True)
     if save_all:
         for v, dist, drr in results:
-            out_path = out_dir / f"drr_atten_{v:.4f}_axis{beam_axis}.tif"
+            out_path = out_dir / f"drr_atten_{v:.4f}.tif"
             tiff.imwrite(out_path, drr.astype(np.float32))
         print(f"Saved all {len(results)} DRRs to {out_dir}")
     elif real_img is not None:
-        out_path = out_dir / f"drr_atten_{best_v:.4f}_axis{beam_axis}_BEST.tif"
+        out_path = out_dir / f"drr_atten_{best_v:.4f}_BEST.tif"
         tiff.imwrite(out_path, best_drr.astype(np.float32))
         print(f"Saved only the best-scoring DRR to {out_path}")
 
@@ -455,21 +399,30 @@ if __name__ == "__main__":
                          help="through-slice (Z) voxel spacing, in mm, if different from "
                               "the in-plane value (anisotropic volume). Defaults to the "
                               "same value as --voxel-spacing-mm if not given (isotropic).")
+    parser.add_argument("--sid-mm", type=float, default=1230.0,
+                         help="source-to-detector distance, mm. Defaults to the CEP_378A/"
+                              "CEP_1191-confirmed value, NOT confirmed universal across "
+                              "specimens, override if a specimen's DRR field-of-view doesn't "
+                              "match its real PXR at the defaults.")
+    parser.add_argument("--spd-mm", type=float, default=800.0,
+                         help="source-to-patient distance, mm. Same caveat as --sid-mm, "
+                              "operators likely position different-sized specimens at "
+                              "different distances, this may not be a universal constant.")
+    parser.add_argument("--offset-v-mm", type=float, default=0.0,
+                         help="shift the projection's vertical centering (mm), for when the "
+                              "real device wasn't aimed at the volume's exact geometric "
+                              "center (e.g. framing too much pot, not enough canopy). Sign "
+                              "isn't derived from physics here, try a value, flip sign if it "
+                              "moves the wrong way. Independent of --sid-mm/--spd-mm, which "
+                              "only control distance/magnification, not framing.")
+    parser.add_argument("--offset-u-mm", type=float, default=0.0,
+                         help="same as --offset-v-mm but for the other detector-plane axis "
+                              "(horizontal centering)")
     parser.add_argument("--atten-min", type=float, default=0.002,
                          help="lower bound for the attenuation_scale search")
     parser.add_argument("--atten-max", type=float, default=0.2,
                          help="upper bound for the attenuation_scale search. Raise this if "
                               "the fitted value comes back pinned at the previous max.")
-    parser.add_argument("--fit-gamma", action="store_true",
-                         help="jointly fit a gamma tone-curve exponent alongside "
-                              "attenuation_scale (drr = beer_lambert_output ** gamma). Use "
-                              "this if a single attenuation_scale can't match the real "
-                              "image's contrast/dynamic range, only applies to the optimizer "
-                              "path, not --sweep or --fixed-attenuation.")
-    parser.add_argument("--gamma-min", type=float, default=0.3,
-                         help="lower bound for gamma search (only used with --fit-gamma)")
-    parser.add_argument("--gamma-max", type=float, default=2.0,
-                         help="upper bound for gamma search (only used with --fit-gamma)")
     parser.add_argument("--metric", default="ssim", choices=["ssim", "wasserstein", "ncc", "mi"])
     parser.add_argument("--sweep", default=None,
                          help="comma-separated attenuation_scale values to render and save "
@@ -480,11 +433,6 @@ if __name__ == "__main__":
                               "instead of optimizing, e.g. --fixed-attenuation 0.02,0.04,0.06,0.08. "
                               "Skips the SSIM search, prints attenuation_scale/Distance for each, "
                               "then reports the best one. Only the best-scoring DRR is saved.")
-    parser.add_argument("--fixed-gamma", default=None,
-                         help="one value, or comma-separated list, of gamma tone-curve values "
-                              "to test alongside --fixed-attenuation (full grid: every gamma "
-                              "against every attenuation value). Defaults to 1.0 (no gamma "
-                              "correction) if not given. Cheap manual alternative to --fit-gamma.")
     parser.add_argument("--sweep-out-dir", default="attenuation_sweep",
                          help="directory to save sweep outputs into")
     parser.add_argument("--save-all-sweep", action="store_true",
@@ -506,7 +454,8 @@ if __name__ == "__main__":
         parser.error("--pxr is required unless --sweep is given")
 
     if args.sweep:
-        geometry = make_geometry(args.detector_size, args.voxel_spacing_mm, args.voxel_spacing_z_mm)
+        geometry = make_geometry(args.detector_size, args.voxel_spacing_mm, args.voxel_spacing_z_mm,
+                                  args.sid_mm, args.spd_mm, args.offset_v_mm, args.offset_u_mm)
         vol = load_volume(args.xr_path)
         values = [float(v) for v in args.sweep.split(",")]
 
@@ -536,11 +485,7 @@ if __name__ == "__main__":
         if args.fixed_attenuation is not None:
             fixed_atten = [float(v) for v in args.fixed_attenuation.split(",")]
 
-        fixed_gamma = None
-        if args.fixed_gamma is not None:
-            fixed_gamma = [float(v) for v in args.fixed_gamma.split(",")]
-
         main(args.xr_path, args.pxr_path, args.metric, out_drr, args.view,
              args.detector_size, args.voxel_spacing_mm, (args.atten_min, args.atten_max),
              args.voxel_spacing_z_mm, fixed_atten, args.beam_axis,
-             args.fit_gamma, (args.gamma_min, args.gamma_max), fixed_gamma)
+             args.sid_mm, args.spd_mm, args.offset_v_mm, args.offset_u_mm)
