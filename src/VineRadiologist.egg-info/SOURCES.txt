@@ -2,6 +2,7 @@ LICENSE
 README.md
 pyproject.toml
 src/VineRadiologist/__init__.py
+src/VineRadiologist/cone_beam.py
 src/VineRadiologist/config.py
 src/VineRadiologist/deform.py
 src/VineRadiologist/io.py

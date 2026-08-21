@@ -62,9 +62,13 @@ def main(root, out_csv):
         if not specimen_dir.is_dir():
             continue
         dicomobj_dir = specimen_dir / "DICOMOBJ"
-        if not dicomobj_dir.exists():
-            continue
-        for f in sorted(dicomobj_dir.iterdir()):
+        if dicomobj_dir.exists():
+            # old dataset structure: specimen/DICOMOBJ/*.dcm
+            dcm_files = sorted(dicomobj_dir.glob("*.dcm"))
+        else:
+            # new dataset structure: specimen/*.dcm directly
+            dcm_files = sorted(specimen_dir.glob("*.dcm"))
+        for f in dcm_files:
             row, err = extract_all_fields(f)
             if row is not None:
                 row["_specimen"] = specimen_dir.name

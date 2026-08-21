@@ -1,0 +1,31 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<unireconstruction version="1.1" xactrevision=" 9554 Release March 2018 ">
+    <conebeam>
+        <reconstruct rangeMin="0" rangeMax="12" format="16 bit Tiff" filter="Tukey" methode="Filtered Backprojection (Tomography)" yfileformat="16bit Tiff" filterValue="75" iterations="1" appodization="75"/>
+        <volume_acquisition>
+            <voxelSize X="0.177133" Y="0.177133" Z="0.177133"/>
+            <size X="1725" Y="2440" Z="1725"/>
+            <offset X="0.00" Y="107.596" Z="0.00"/>
+            <testSlice X="862" Y="1221" Z="862"/>
+            <rotate X="0" Y="0" Z="0"/>
+        </volume_acquisition>
+        <volume>
+            <voxelSize X="0.177133" Y="0.177133" Z="0.177133"/>
+            <size X="149" Y="94" Z="419"/>
+            <offset X="-102.522" Y="171.609" Z="20.4716"/>
+            <testSlice X="78" Y="45" Z="217"/>
+            <rotate X="-18.0224" Y="-21.6678" Z="5.31263"/>
+        </volume>
+        <profile images="7200" acquisition="Stacked tomography with n turns" turns="5"/>
+        <correction offsetXStack="-1.42222 -1.24444 -0.977778 -1.42222 -1.15556" helicoilOffsetXCorrection="0" trapezoidX="0" trapezoidY="0" TrapXAndScaleWithOffsetX="0" scale="0" shearing="0" offsetXShift="0" tiltZ="0" offsetYShift="0" offsetX="0" offsetY="0" offsetXCorrectionIndex="1" aspectRatio="0"/>
+        <ring_filter defectEnabled="0" falseDetectionLevel="0" replaceStatic="0" replaceNoisy="0" replaceDefect="0" kernel="5" ringEnabled="0"/>
+        <beam shift="0" spectrum="1 0 0 0 0 0 0" black_level="0"/>
+        <phase_filter manu_para="0.05" vector_auto="" enabled="0" type="MANU"/>
+        <spot vertical="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0" scale="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0" horizontal="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"/>
+        <projections cropright="1" end="7199" unused="" cropleft="1" step="1" start="0"/>
+    </conebeam>
+    <acquisitioninfo>
+        <xray current="490" voltage="70"/>
+        <geometry sod="440.452" sdd="631.586"/>
+    </acquisitioninfo>
+</unireconstruction>
