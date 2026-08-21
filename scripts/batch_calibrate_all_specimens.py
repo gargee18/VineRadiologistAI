@@ -63,6 +63,24 @@ KNOWN_OFFSETS = {
     "CEP_988B": -100.0,
 }
 
+# specimens with multiple raw ACQUISITION folders (not just multiple Face
+# files within one folder), where a specific variant has been chosen.
+# Restricts the search to only that folder, so we don't mix in a
+# folder that's already been ruled out.
+# specimens with multiple raw ACQUISITION folders (not just multiple Face
+# files within one folder), where a specific variant has been chosen.
+# Restricts the search to only that folder, so we don't mix in a
+# folder that's already been ruled out.
+#
+# NOTE: CEP_378A_a/_b was found to be a real mislabeling, not a genuine
+# duplicate, "_a" was actually CEP_368B's data. Fixed by renaming the
+# folders on disk (CEP_378A_a -> CEP_368B, CEP_378A_b -> CEP_378A), so
+# no override is needed for CEP_378A anymore, only CEP_330 remains a
+# genuine duplicate-acquisition case.
+FOLDER_OVERRIDES = {
+    "CEP_330": "CEP_330_a",
+}
+
 ATTENUATION_SCALE = 0.02
 
 
@@ -73,20 +91,37 @@ def normalize_specimen_code(patient_name: str) -> str:
     return code.upper()
 
 
-def find_face_candidates(csv_path: str, specimen: str, pxr_dir: Path):
+def find_face_candidates(csv_path: str, specimen: str, pxr_dir: Path, folder_override: str = None):
     """Return list of .tif filenames (stems matching real files on disk)
-    that are labeled 'Face' for this specimen in the metadata CSV."""
+    that are labeled 'Face' for this specimen in the metadata CSV.
+    Checks the plain specimen folder AND any <specimen>_a/_b/... variant
+    folders (for specimens with duplicate raw acquisitions, like CEP_330,
+    CEP_378A), since the plain folder name may not exist for those.
+    If folder_override is given, ONLY that specific folder is searched,
+    for specimens where a particular duplicate-folder variant has
+    already been chosen."""
     rows = list(csv_module.DictReader(open(csv_path)))
-    candidates = []
+    face_stems = set()
     for r in rows:
         if normalize_specimen_code(r["PatientName"]) != specimen:
             continue
         if "face" not in r.get("SeriesDescription", "").lower():
             continue
-        stem = Path(r["_file"]).stem
-        tif_path = pxr_dir / specimen / f"{stem}.tif"
-        if tif_path.exists():
-            candidates.append(tif_path)
+        face_stems.add(Path(r["_file"]).stem)
+
+    if folder_override:
+        candidate_dirs = [pxr_dir / folder_override]
+    else:
+        candidate_dirs = [pxr_dir / specimen] + sorted(pxr_dir.glob(f"{specimen}_*"))
+
+    candidates = []
+    for d in candidate_dirs:
+        if not d.is_dir():
+            continue
+        for stem in face_stems:
+            tif_path = d / f"{stem}.tif"
+            if tif_path.exists():
+                candidates.append(tif_path)
     return sorted(set(candidates))
 
 
@@ -100,7 +135,7 @@ def run(cmd):
     return True
 
 
-def main(xr_dir, pxr_dir, csv_path, results_dir, detector_size):
+def main(xr_dir, pxr_dir, csv_path, results_dir, detector_size, global_offset=None):
     xr_dir = Path(xr_dir)
     pxr_dir = Path(pxr_dir)
     results_dir = Path(results_dir)
@@ -116,24 +151,30 @@ def main(xr_dir, pxr_dir, csv_path, results_dir, detector_size):
             skipped.append((specimen, "no CT volume"))
             continue
 
-        candidates = find_face_candidates(csv_path, specimen, pxr_dir)
-        if len(candidates) != 1:
-            print(f"  SKIP: found {len(candidates)} Face-view candidate(s), "
-                  f"need exactly 1, confirm manually: {candidates}")
-            skipped.append((specimen, f"{len(candidates)} Face candidates"))
+        candidates = find_face_candidates(csv_path, specimen, pxr_dir,
+                                           folder_override=FOLDER_OVERRIDES.get(specimen))
+        if len(candidates) == 0:
+            print(f"  SKIP: no real PXR data found for this specimen (0 Face files)")
+            skipped.append((specimen, "no PXR data"))
             continue
 
-        pxr_path = candidates[0]
-        offset_v = KNOWN_OFFSETS.get(specimen, 0.0)
+        # DRR generation doesn't depend on which real image is used for
+        # scoring (attenuation_scale is FIXED, not fitted), so any one
+        # candidate works to drive the generation call. We compare
+        # against ALL candidates separately afterward.
+        pxr_for_generation = candidates[0]
+        # --global-offset-v-mm overrides KNOWN_OFFSETS for every specimen,
+        # for looping this same script across several offset values by hand
+        offset_v = global_offset if global_offset is not None else KNOWN_OFFSETS.get(specimen, 0.0)
+        offset_tag = f"_offset{offset_v:g}" if global_offset is not None else ""
 
         specimen_dir = results_dir / specimen
-        drr_out = specimen_dir / "DRR" / "test" / "calibrated.tif"
-        dist_out = specimen_dir / "Distribution" / "dist_calibrated.png"
+        drr_out = specimen_dir / "DRR" / "test" / f"calibrated{offset_tag}.tif"
 
         ok = run([
             "python", "scripts/calibrate_drr.py",
             "--xr", str(xr_path),
-            "--pxr", str(pxr_path),
+            "--pxr", str(pxr_for_generation),
             "--voxel-spacing-mm", str(spacing_xy),
             "--voxel-spacing-z-mm", str(spacing_z),
             "--offset-v-mm", str(offset_v),
@@ -146,17 +187,23 @@ def main(xr_dir, pxr_dir, csv_path, results_dir, detector_size):
             failed.append((specimen, "calibrate_drr.py failed"))
             continue
 
-        ok = run([
-            "python", "scripts/compare_distributions_multi.py",
-            "--real", str(pxr_path),
-            "--drr", f"calibrated={drr_out}",
-            "--out", str(dist_out),
-        ])
-        if not ok:
-            failed.append((specimen, "compare_distributions_multi.py failed"))
+        all_dist_ok = True
+        for i, candidate in enumerate(candidates):
+            dist_out = specimen_dir / "Distribution" / f"dist_calibrated{offset_tag}_vs_{candidate.stem}.png"
+            ok = run([
+                "python", "scripts/compare_distributions_multi.py",
+                "--real", str(candidate),
+                "--drr", f"calibrated={drr_out}",
+                "--out", str(dist_out),
+            ])
+            if not ok:
+                all_dist_ok = False
+
+        if not all_dist_ok:
+            failed.append((specimen, "compare_distributions_multi.py failed for at least one candidate"))
             continue
 
-        succeeded.append(specimen)
+        succeeded.append(f"{specimen} ({len(candidates)} candidate(s) compared)")
 
     print(f"\n\n=== SUMMARY ===")
     print(f"Succeeded ({len(succeeded)}): {succeeded}")
@@ -175,5 +222,12 @@ if __name__ == "__main__":
     parser.add_argument("--csv", required=True, help="portable_xr_metadata.csv")
     parser.add_argument("--results-dir", default="results/PXR_DRR_2026")
     parser.add_argument("--detector-size", type=int, default=512)
+    parser.add_argument("--global-offset-v-mm", type=float, default=None,
+                         help="apply this offset_v_mm to EVERY specimen, overriding "
+                              "KNOWN_OFFSETS. Loop this script over several values by hand "
+                              "to sweep framing across all specimens at once. Output "
+                              "filenames include the offset so repeated runs don't clobber "
+                              "each other.")
     args = parser.parse_args()
-    main(args.xr_dir, args.pxr_dir, args.csv, args.results_dir, args.detector_size)
+    main(args.xr_dir, args.pxr_dir, args.csv, args.results_dir, args.detector_size,
+         args.global_offset_v_mm)
