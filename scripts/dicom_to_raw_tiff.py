@@ -32,15 +32,32 @@ import tifffile as tiff
 
 def export_one(dcm_path: Path, out_path: Path):
     ds = pydicom.dcmread(str(dcm_path), force=True)
-    pixels = ds.pixel_array  # raw, as-stored, no modifications
+    pixels = ds.pixel_array
+
+    spacing = getattr(ds, "DetectorElementPhysicalSize", None) or getattr(ds, "PixelSpacing", None)
+    if spacing is not None:
+        px_mm = float(spacing[0])
+    else:
+        px_mm = None
+        print(f"  WARNING: no pixel spacing found in DICOM tags for {dcm_path.name}, "
+              f"output TIFF will have no resolution metadata")
 
     print(f"{dcm_path.name}: dtype={pixels.dtype} shape={pixels.shape} "
           f"min={pixels.min()} max={pixels.max()} "
           f"PhotometricInterpretation={getattr(ds, 'PhotometricInterpretation', '?')} "
-          f"SeriesDescription={getattr(ds, 'SeriesDescription', '?')}")
+          f"SeriesDescription={getattr(ds, 'SeriesDescription', '?')} "
+          f"pixel_spacing_mm={px_mm}")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    tiff.imwrite(str(out_path), pixels)  # writes at native dtype (uint16 here), no rescale
+    if px_mm:
+        # TIFF resolution tags are stored as pixels-per-unit, not mm-per-pixel,
+        # so it's 1/px_mm, unit set to centimeter (TIFF's ResolutionUnit doesn't
+        # support mm directly)
+        res = 10.0 / px_mm  # pixels per cm
+        tiff.imwrite(str(out_path), pixels, resolution=(res, res),
+                     resolutionunit="CENTIMETER")
+    else:
+        tiff.imwrite(str(out_path), pixels)
     print(f"  -> {out_path}")
 
 
