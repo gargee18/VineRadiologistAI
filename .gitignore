@@ -22,3 +22,18 @@ dist/
 venv/
 .pytest_cache/
 .DS_Store
+
+# Data files
+*.csv
+*.roi
+*.zip
+
+# Results and ROI directories
+results/
+polygonrois/
+
+# Additional scientific data
+*.npy
+*.npz
+*.h5
+*.hdf5
