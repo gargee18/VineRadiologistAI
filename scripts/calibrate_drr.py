@@ -2020,6 +2020,83 @@ def save_drr_float32(
 
 
 # =============================================================================
+# OPTIONAL LOG / LINEAR-INTENSITY COMPARISON
+# =============================================================================
+
+def log_attenuation_to_linear(drr_log):
+    """Convert A=-log(I/I0) to a bright-object linear-intensity image.
+
+    The output is the absorbed fraction, 1 - I/I0 = 1 - exp(-A), NOT the
+    transmitted intensity I/I0 itself (which would be exp(-A)). The name
+    "linear" refers to the detector intensity domain, not linearity in A.
+    This conversion is applied AFTER projection; it never changes geometry.
+    """
+    a = np.asarray(drr_log, dtype=np.float32)
+    return (-np.expm1(-np.maximum(a, 0.0))).astype(np.float32)
+
+
+def save_log_linear_histogram(path, drr_log, drr_linear, hist_mask=None):
+    """Compare intensities on the same mask and the same FIXED [0,1] scale.
+
+    The log histogram uses clip(A,0,1), exactly as save_drr_16bit does.
+    The linear histogram uses 1-exp(-A), without per-image min/max stretching.
+    The full-resolution float log data may exceed 1; report clipping fraction.
+    """
+    log_img = np.asarray(drr_log, dtype=np.float32)
+    linear_img = np.asarray(drr_linear, dtype=np.float32)
+    if log_img.shape != linear_img.shape:
+        raise ValueError('Log and linear DRRs must have identical shape')
+
+    if hist_mask is None:
+        # Exclude the large empty detector area, but preserve every positive
+        # projected sample. Optionally use --hist-mask for a trunk-only ROI.
+        mask = np.isfinite(log_img) & (log_img > 0)
+        mask_label = 'positive DRR pixels'
+    else:
+        mask_img = tiff.imread(str(hist_mask))
+        if mask_img.shape != log_img.shape:
+            raise ValueError(
+                f'Histogram mask shape {mask_img.shape} does not match '
+                f'DRR shape {log_img.shape}'
+            )
+        mask = (mask_img > 0) & np.isfinite(log_img)
+        mask_label = str(hist_mask)
+
+    if not np.any(mask):
+        raise ValueError('Histogram region contains no valid pixels')
+
+    log_raw = log_img[mask]
+    log_pixels = np.clip(log_raw, 0.0, 1.0)
+    linear_pixels = np.clip(linear_img[mask], 0.0, 1.0)
+    bins = np.linspace(0.0, 1.0, 151)
+    centers = (bins[:-1] + bins[1:]) / 2.0
+    log_hist, _ = np.histogram(log_pixels, bins=bins, density=True)
+    linear_hist, _ = np.histogram(linear_pixels, bins=bins, density=True)
+    clipped_percent = 100.0 * float(np.mean(log_raw > 1.0))
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(10, 5.5))
+    # Actual overlaid histogram bars, with identical bins and region.
+    bin_widths = np.diff(bins)
+    ax.bar(centers, log_hist, width=bin_widths, alpha=0.45,
+           label='Log attenuation A (clipped to 0–1)', align='center')
+    ax.bar(centers, linear_hist, width=bin_widths, alpha=0.45,
+           label='Linear-intensity absorption 1 − exp(−A)', align='center')
+    ax.set(xlabel='Intensity on fixed 0–1 scale', ylabel='Probability density',
+           title='DRR histogram: log attenuation vs linear-intensity absorption')
+    ax.legend()
+    ax.grid(alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(path, dpi=200)
+    plt.close(fig)
+    print(f'Histogram region: {mask_label} ({log_raw.size:,} pixels)')
+    print(f'Log attenuation > 1 (clipped in 16-bit TIFF): {clipped_percent:.2f}%')
+    print(f'Log/linear histogram written to {path}')
+
+
+
+# =============================================================================
 # CALIBRATION
 # =============================================================================
 
@@ -2902,7 +2979,33 @@ def main():
         default=None,
     )
 
+    parser.add_argument(
+        "--compare-log-linear",
+        action="store_true",
+        help=(
+            "Save the existing log/attenuation DRR unchanged, also save "
+            "1-exp(-A) as a 16-bit linear-intensity absorption DRR and "
+            "plot their fixed-scale histograms."
+        ),
+    )
+    parser.add_argument(
+        "--hist-mask",
+        default=None,
+        help=(
+            "Optional TIFF mask for BOTH DRR histograms (e.g. PXR trunk mask). "
+            "Must match the output DRR shape; without it, use positive DRR pixels."
+        ),
+    )
+
     args = parser.parse_args()
+
+    if args.compare_log_linear and args.sweep is not None:
+        parser.error(
+            "--compare-log-linear is for a selected/fixed DRR, not a sweep. "
+            "Use --fixed-attenuation or --attenuation-scale."
+        )
+    if args.hist_mask is not None and not args.compare_log_linear:
+        parser.error("--hist-mask requires --compare-log-linear")
 
     # -----------------------------------------------------------------
     # Spacing
@@ -3288,14 +3391,29 @@ def main():
             args.out_drr
         )
 
+    # When comparing both representations, --out-drr supplies the shared
+    # base name. Strip an existing representation suffix, if present, so
+    # e.g. example_log.tif produces example_log.tif + example_linear.tif.
+    if args.compare_log_linear:
+        base_stem = out_drr.stem
+        for suffix in ("_log_linear", "_linear", "_log"):
+            if base_stem.endswith(suffix):
+                base_stem = base_stem[:-len(suffix)]
+                break
+        log_path = out_drr.with_name(base_stem + "_log.tif")
+        linear_path = out_drr.with_name(base_stem + "_linear.tif")
+        hist_path = out_drr.with_name(base_stem + "_log_vs_linear_hist.png")
+    else:
+        log_path = out_drr  # Preserve existing non-comparison CLI behavior.
+
     save_drr_16bit(
-        out_drr,
+        log_path,
         result["drr"],
         geometry.detector_pixel_spacing_mm,
     )
 
     print(
-        f"16-bit DRR written to {out_drr}"
+        f"16-bit log DRR written to {log_path}"
     )
 
     if args.out_float is not None:
@@ -3307,6 +3425,24 @@ def main():
 
         print(
             f"Float32 DRR written to {args.out_float}"
+        )
+
+    if args.compare_log_linear:
+        # Only transform intensities. The exact same CT, pose, detector, crop
+        # and ray integral produce both outputs. The saved log DRR above is
+        # untouched, preserving compatibility with manual registration.
+        linear_drr = log_attenuation_to_linear(result["drr"])
+        save_drr_16bit(
+            linear_path,
+            linear_drr,
+            geometry.detector_pixel_spacing_mm,
+        )
+        print(f"Linear-intensity absorption DRR written to {linear_path}")
+        save_log_linear_histogram(
+            hist_path,
+            result["drr"],
+            linear_drr,
+            hist_mask=args.hist_mask,
         )
 
 
