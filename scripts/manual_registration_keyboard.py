@@ -1,4 +1,3 @@
-from builtins import float
 import sys
 import time
 import threading
@@ -22,19 +21,20 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 sys.path.insert(0, str(SCRIPT_DIR))
 
-CT_PATH = Path(
-    "/home/phukon/Desktop/Ct_PXR_manual_registration/CEP_1191_2026_XR.tif"
-)
-PXR_PATH = Path(
-    "/home/phukon/Desktop/Ct_PXR_manual_registration/CEP_1191_2026_PXR.tif"
+SPECIMEN = "CEP_313B"
+
+OUT_DIR = Path(
+    "/home/phukon/Desktop/Ct_PXR_manual_registration"
 )
 
-OUT_DIR = Path("/home/phukon/Desktop/Ct_PXR_manual_registration")
+CT_PATH = OUT_DIR / f"{SPECIMEN}_2026_XR.tif"
+PXR_PATH = OUT_DIR / f"{SPECIMEN}_2026_PXR.tif"
 
-TRANSFORM_PATH = OUT_DIR / "CEP_1191_transform_test.txt"
-PREVIEW_PATH = OUT_DIR / "CEP_1191_DRR_preview.tif"
-OVERLAY_PATH = OUT_DIR / "CEP_1191_PXR_DRR_overlay.tif"
-FINAL_DRR_PATH = OUT_DIR / "CEP_1191_DRR_test.tif"
+TRANSFORM_PATH = OUT_DIR / f"{SPECIMEN}_transform_test.txt"
+REGISTRATION_INFO_PATH = OUT_DIR / f"{SPECIMEN}_registration_info_test.txt"
+PREVIEW_PATH = OUT_DIR / f"{SPECIMEN}_DRR_preview_test.tif"
+OVERLAY_PATH = OUT_DIR / f"{SPECIMEN}_PXR_DRR_overlay_test.tif"
+FINAL_DRR_PATH = OUT_DIR / f"{SPECIMEN}_DRR_test.tif"
 
 
 # =============================================================================
@@ -86,7 +86,7 @@ ROTATION_STEP_DEG = 0.5
 # =============================================================================
 
 SID_MM = 1230.0
-SPD_MM = 930.0
+SPD_MM = 800.0
 
 # CEP_1191
 OFFSET_V_MM = -20.0
@@ -95,7 +95,7 @@ OFFSET_U_MM = 0.0
 # Linear gain applied to the integrated attenuation.
 # Because the output is now in log/attenuation domain, this is a linear
 # intensity calibration factor, not an exponential-opacity parameter.
-ATTENUATION_SCALE = 0.020
+ATTENUATION_SCALE = 0.015
 BEAM_AXIS = 0
 
 PREVIEW_SIZE = 512
@@ -103,7 +103,7 @@ FINAL_SIZE = 3072
 
 # Preview uses a lower-resolution CT but preserves its physical dimensions.
 # This makes ENTER much faster.
-PREVIEW_CT_DOWNSAMPLE = 2
+PREVIEW_CT_DOWNSAMPLE = 4
 
 PREVIEW_ROW_CHUNK = 32
 PREVIEW_SAMPLE_CHUNK = 256
@@ -115,8 +115,8 @@ CPU_PREVIEW_SAMPLE_CHUNK = 64
 FINAL_ROW_CHUNK = 8
 FINAL_SAMPLE_CHUNK = 128
 
-# Live preview: mouse/keyboard changes to the PHYSICAL pose automatically
-# trigger a new preview. Viewer-only front/back motion does not.
+# Live preview: mouse/keyboard changes to the PHYSICAL XYZ pose automatically
+# trigger a new preview, including front/back beam-depth motion.
 LIVE_PREVIEW_POLL_SEC = 0.08
 POSE_ROT_ATOL = 1e-6
 POSE_TRANS_ATOL_MM = 1e-4
@@ -127,8 +127,8 @@ POSE_TRANS_ATOL_MM = 1e-4
 # Keep these between 0 and 1:
 #   lower = darker channel
 #   higher = brighter channel
-OVERLAY_PXR_GAIN = 0.75
-OVERLAY_DRR_GAIN = 0.95
+OVERLAY_PXR_GAIN = 0.55
+OVERLAY_DRR_GAIN = 0.55
 
 
 # =============================================================================
@@ -915,11 +915,15 @@ pose_lock = threading.Lock()
 pose_R_xyz = np.eye(3, dtype=np.float64)
 pose_t_xyz = np.zeros(3, dtype=np.float64)
 
-# VIEWER-ONLY extra front/back displacement.
 # BEAM_AXIS=0 in NumPy ZYX corresponds to Fiji Z.
-# This is added only to the 3D Viewer display and is NEVER sent to the DRR
-# or written to the final transform file.
-viewer_only_beam_offset_mm = 0.0
+# Front/back motion is PHYSICAL again:
+#   Fiji Z translation is sent to the DRR and saved in the final transform.
+#
+# With the current geometry:
+#   effective SPD = SPD_MM + pose_t_xyz[2]
+#
+# Positive Z moves the CT farther from the source.
+# Negative Z moves the CT closer to the source.
 
 viewer_center_xyz = np.array(
     [
@@ -935,20 +939,16 @@ def sync_pose_from_fiji():
     """
     Synchronize the live Fiji object pose with our tracked registration pose.
 
-    Mouse rotations remain PHYSICAL.
-    Mouse X/Y translations remain PHYSICAL detector-plane translations.
+    Mouse rotations are PHYSICAL.
+    Mouse X/Y/Z translations are PHYSICAL.
 
-    Mouse Z translation is treated as VIEWER-ONLY front/back displacement.
-    Keyboard 0/5 front/back movement is also VIEWER-ONLY.
+    For BEAM_AXIS=0, Fiji Z is the beam-depth direction, so front/back
+    translation changes the effective source-to-object-centre distance and
+    therefore the DRR magnification.
 
-    Neither changes:
-        - the DRR
-        - SPD / magnification
-        - the saved transform
-
-    Physical beam-depth is locked to the calibrated acquisition position.
+    The full XYZ translation is sent to the DRR and saved in the transform.
     """
-    global pose_R_xyz, pose_t_xyz, viewer_only_beam_offset_mm
+    global pose_R_xyz, pose_t_xyz
 
     local_translate = Transform3D()
     local_rotate = Transform3D()
@@ -982,32 +982,18 @@ def sync_pose_from_fiji():
     )
 
     with pose_lock:
-        # Mouse rotation is part of the real registration.
         pose_R_xyz = R
-
-        # Detector-plane mouse shifts remain physical.
-        pose_t_xyz[0] = live_u_xyz[0]
-        pose_t_xyz[1] = live_u_xyz[1]
-
-        # Fiji Z is the beam/depth direction for BEAM_AXIS=0.
-        # All live Z displacement is viewer-only.
-        viewer_only_beam_offset_mm = float(live_u_xyz[2])
-
-        # Lock physical beam-depth so the DRR always uses calibrated SPD=930 mm.
-        pose_t_xyz[2] = 0.0
+        pose_t_xyz[:] = live_u_xyz
 
         return (
             pose_R_xyz.copy(),
             pose_t_xyz.copy(),
-            float(viewer_only_beam_offset_mm),
         )
-
 
 
 def current_pose(sync_from_fiji=True):
     if sync_from_fiji:
-        R, t, _ = sync_pose_from_fiji()
-        return R, t
+        return sync_pose_from_fiji()
 
     with pose_lock:
         return (
@@ -1016,25 +1002,23 @@ def current_pose(sync_from_fiji=True):
         )
 
 
-def current_viewer_offset():
-    with pose_lock:
-        return float(viewer_only_beam_offset_mm)
+def effective_spd_mm(translation_xyz=None):
+    if translation_xyz is None:
+        with pose_lock:
+            translation_xyz = pose_t_xyz.copy()
+
+    # Fiji Z maps to NumPy beam axis 0 in this project.
+    return float(SPD_MM + float(translation_xyz[2]))
 
 
 
 def update_fiji_from_pose():
     """
-    Display transform = physical registration pose + viewer-only beam offset.
-
-    Only the physical registration pose is used for DRR/saving.
+    Display exactly the same physical registration pose used by the DRR.
     """
     with pose_lock:
         R = pose_R_xyz.copy()
-        u_physical = pose_t_xyz.copy()
-        viewer_z = float(viewer_only_beam_offset_mm)
-
-    u_display = u_physical.copy()
-    u_display[2] += viewer_z
+        u_display = pose_t_xyz.copy()
 
     M = np.eye(4, dtype=np.float64)
     M[:3, :3] = R
@@ -1054,31 +1038,25 @@ def update_fiji_from_pose():
     univ.fireTransformationUpdated()
 
 
-
 def apply_translation(dx, dy, dz):
-    global pose_t_xyz, viewer_only_beam_offset_mm
+    global pose_t_xyz
 
     # First absorb any mouse changes.
-    # Mouse front/back is already kept viewer-only by sync_pose_from_fiji().
     sync_pose_from_fiji()
 
     with pose_lock:
-        # Fiji X/Y are physical detector-plane registration translations.
         pose_t_xyz[0] += float(dx)
         pose_t_xyz[1] += float(dy)
-
-        # Fiji Z is the beam/depth direction for this project.
-        # Keyboard 0/5 is ALSO viewer-only, just like mouse front/back.
-        # Therefore it never changes the DRR magnification, SPD, or saved transform.
-        viewer_only_beam_offset_mm += float(dz)
-
-        # Physical beam-depth remains fixed at the calibrated acquisition position.
-        pose_t_xyz[2] = 0.0
+        pose_t_xyz[2] += float(dz)
 
     update_fiji_from_pose()
 
-    # X/Y are physical detector-plane changes and therefore affect the DRR.
-    if abs(float(dx)) > 0.0 or abs(float(dy)) > 0.0:
+    # X/Y/Z are all physical now, so every translation changes the DRR.
+    if (
+        abs(float(dx)) > 0.0
+        or abs(float(dy)) > 0.0
+        or abs(float(dz)) > 0.0
+    ):
         preview_event.set()
 
 
@@ -1403,7 +1381,7 @@ MANUAL CT -> PXR REGISTRATION
 Translation
   4 / 6   X - / +
   8 / 2   Y - / +
-  0 / 5   viewer front/back + / -   [viewer only]
+  0 / 5   Z front/back + / -        [physical]
 
 Rotation
   7 / 9   pitch -/+
@@ -1443,15 +1421,20 @@ Mouse edits and keyboard edits are synchronized.
 Rotations are about the CT center, so they no longer create fake translation.
 
 Depth handling:
-  mouse front/back shift -> VIEWER ONLY
-  keyboard 0 / 5 shift  -> VIEWER ONLY
+  mouse front/back shift -> PHYSICAL
+  keyboard 0 / 5 shift  -> PHYSICAL
 
-Physical beam-depth is locked to the calibrated acquisition position.
-Therefore SPD stays fixed at 930 mm.
+Initial SPD = 800 mm.
 
-Viewer-only depth is excluded from:
+For BEAM_AXIS=0:
+  effective SPD = 800 mm + Fiji Z translation
+
+Positive Z moves the CT farther from the source and reduces magnification.
+Negative Z moves the CT closer to the source and increases magnification.
+
+The Z translation is included in:
   DRR
-  SPD / magnification
+  effective SPD / magnification
   saved transform
 ============================================================
 """
@@ -1498,9 +1481,8 @@ preview_event.set()
 
 while not quit_event.is_set():
 
-    # Poll the live Fiji object so mouse rotations/translations also trigger
-    # the DRR automatically. Viewer-only beam-depth does not appear in R/t,
-    # therefore it does not cause pointless rerenders.
+    # Poll the live Fiji object so mouse rotations and all XYZ translations
+    # trigger the DRR automatically. Z/front-back is physical again.
     if (
         not preview_event.is_set()
         and not save_event.is_set()
@@ -1547,12 +1529,13 @@ while not quit_event.is_set():
                 ),
             )
             print(
-                f"Viewer-only beam offset: "
-                f"{current_viewer_offset():.3f} mm "
-                f"(excluded from DRR / saved transform)"
+                f"Beam-depth translation Z: "
+                f"{true_translation_xyz[2]:+.3f} mm"
             )
             print(
-                "Physical beam-depth: fixed at calibrated SPD = 930 mm"
+                f"Effective SPD: "
+                f"{effective_spd_mm(true_translation_xyz):.3f} mm "
+                f"(initial SPD={SPD_MM:.1f} mm)"
             )
 
             if np.max(np.abs(true_translation_xyz)) > 300.0:
@@ -1655,6 +1638,55 @@ while not quit_event.is_set():
 
             print(
                 f"Saved transform: {TRANSFORM_PATH}"
+            )
+
+            effective_spd = effective_spd_mm(
+                true_translation_xyz
+            )
+
+            with open(
+                REGISTRATION_INFO_PATH,
+                "w",
+                encoding="utf-8",
+            ) as f:
+                f.write(
+                    f"specimen = {SPECIMEN}\n"
+                )
+                f.write(
+                    f"translation_x_mm = "
+                    f"{true_translation_xyz[0]:.6f}\n"
+                )
+                f.write(
+                    f"translation_y_mm = "
+                    f"{true_translation_xyz[1]:.6f}\n"
+                )
+                f.write(
+                    f"translation_z_mm = "
+                    f"{true_translation_xyz[2]:.6f}\n"
+                )
+                f.write(
+                    f"initial_spd_mm = "
+                    f"{SPD_MM:.6f}\n"
+                )
+                f.write(
+                    f"effective_spd_mm = "
+                    f"{effective_spd:.6f}\n"
+                )
+
+            print(
+                f"Saved registration info: "
+                f"{REGISTRATION_INFO_PATH}"
+            )
+            print(
+                f"Physical translation XYZ: "
+                f"({true_translation_xyz[0]:+.3f}, "
+                f"{true_translation_xyz[1]:+.3f}, "
+                f"{true_translation_xyz[2]:+.3f}) mm"
+            )
+            print(
+                f"Effective SPD: "
+                f"{effective_spd:.3f} mm "
+                f"(initial SPD={SPD_MM:.1f} mm)"
             )
 
             if CUPY_AVAILABLE:

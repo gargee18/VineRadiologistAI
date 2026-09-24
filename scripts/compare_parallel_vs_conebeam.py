@@ -45,7 +45,7 @@ from PIL import Image
 from VineRadiologist import (
     load_specimen, generate_drr, apply_yaw, apply_pitch, apply_roll, apply_distance,
 )
-from VineRadiologist.cone_beam import ConeBeamGeometry, generate_cone_beam_drr
+from VineRadiologist.cone_beam_exp import ConeBeamGeometry, generate_cone_beam_drr
 
 
 def load_real_pixels(real_dir):

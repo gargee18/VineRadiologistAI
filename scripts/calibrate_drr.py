@@ -4,7 +4,7 @@ Reusable cone-beam DRR renderer + calibration utilities.
 This file merges:
   1. the newer calibration workflow features:
        - attenuation sweeps
-       - SSIM / NCC / PSNR / MI / Wasserstein metrics
+       - SSIM / CC / PSNR / MI / Wasserstein metrics
        - optional DRR/PXR masks
        - CSV sweep output
        - optional manual Fiji transform
@@ -1548,25 +1548,15 @@ def compute_distance(
             )
         )
 
-    if metric == "ncc":
-        s = sim_n - sim_n.mean()
-        r = real_n - real_n.mean()
-
-        denom = np.sqrt(
-            np.sum(s ** 2)
-            * np.sum(r ** 2)
-        )
-
-        if denom == 0:
-            return 1.0
-
-        ncc = (
-            np.sum(s * r)
-            / denom
+    if metric == "cc":
+        cc = float(
+            np.mean(
+                sim_n * real_n
+            )
         )
 
         return float(
-            1.0 - ncc
+            1.0 - cc
         )
 
     if metric == "ssim":
@@ -1687,7 +1677,7 @@ def compute_sweep_metric(
 
     With masks:
       - Wasserstein compares foreground distributions independently.
-      - SSIM/NCC/PSNR/MI use the intersection because they require spatial
+      - SSIM/CC/PSNR/MI use the intersection because they require spatial
         correspondence.
 
     Without masks:
@@ -1695,7 +1685,7 @@ def compute_sweep_metric(
 
     Return convention:
       - Wasserstein: lower is better
-      - SSIM/NCC/PSNR/MI: higher is better
+      - SSIM/CC/PSNR/MI: higher is better
     """
     if sim.shape != real.shape:
         raise ValueError(
@@ -1767,28 +1757,11 @@ def compute_sweep_metric(
                 "DRR and PXR masks have no overlapping foreground pixels."
             )
 
-        if metric == "ncc":
-            s = sim_n[common]
-            r = real_n[common]
-
-            s = (
-                s - s.mean()
-            )
-            r = (
-                r - r.mean()
-            )
-
-            denom = np.sqrt(
-                np.sum(s ** 2)
-                * np.sum(r ** 2)
-            )
-
-            return (
-                0.0
-                if denom == 0
-                else float(
-                    np.sum(s * r)
-                    / denom
+        if metric == "cc":
+            return float(
+                np.mean(
+                    sim_n[common]
+                    * real_n[common]
                 )
             )
 
@@ -1866,27 +1839,10 @@ def compute_sweep_metric(
             )
         )
 
-    if metric == "ncc":
-        s = (
-            sim_n
-            - sim_n.mean()
-        )
-        r = (
-            real_n
-            - real_n.mean()
-        )
-
-        denom = np.sqrt(
-            np.sum(s ** 2)
-            * np.sum(r ** 2)
-        )
-
-        return (
-            0.0
-            if denom == 0
-            else float(
-                np.sum(s * r)
-                / denom
+    if metric == "cc":
+        return float(
+            np.mean(
+                sim_n * real_n
             )
         )
 
@@ -2269,17 +2225,25 @@ def sweep(
     transform=None,
     drr_mask=None,
     pxr_mask=None,
+    fast_sweep=False,
 ):
     """
-    Generate a NEW DRR from the CT for every attenuation value using the same
-    geometry and optional manual-registration transform.
+    Attenuation sweep using the same geometry and optional manual-registration
+    transform.
+
+    With fast_sweep=True, the expensive ray integral is computed only once.
+    This is mathematically exact for this renderer because attenuation_scale
+    is applied only AFTER ray integration:
+
+        DRR(scale) = scale * integral(volume dl)
+
+    No saved/normalized 16-bit DRR is rescaled. The reusable object is the
+    unclipped float line-integral image before saving/normalization.
 
     When a PXR is supplied, the sweep writes the same multi-metric table used
-    for attenuation selection. Wasserstein is reported as a similarity score:
+    for attenuation selection. Wasserstein is reported as:
 
         wasserstein_score = 1 - wasserstein_distance
-
-    Therefore every score column in attenuation_metrics.csv is higher=better.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(
@@ -2297,6 +2261,35 @@ def sweep(
 
     results = []
 
+    base_drr = None
+
+    if fast_sweep:
+        print()
+        print(
+            "======================================"
+        )
+        print(
+            "FAST CPU SWEEP: computing ray integral once"
+        )
+        print(
+            "======================================"
+        )
+
+        # attenuation_scale=1.0 returns the unclipped float line-integral
+        # image for this fixed CT geometry/transform. Every requested
+        # attenuation is then an exact scalar multiple of this result.
+        base_drr = _prepare_registered_drr(
+            vol,
+            geometry,
+            1.0,
+            use_gpu,
+            row_chunk,
+            sample_chunk,
+            object_transform=transform,
+            crop_to_pxr=crop_to_pxr,
+            real_img=real_img,
+        )
+
     for attenuation_scale in values:
         print()
         print(
@@ -2310,18 +2303,25 @@ def sweep(
             "======================================"
         )
 
-        # IMPORTANT: this renders a fresh DRR from the CT for every value.
-        drr = _prepare_registered_drr(
-            vol,
-            geometry,
-            float(attenuation_scale),
-            use_gpu,
-            row_chunk,
-            sample_chunk,
-            object_transform=transform,
-            crop_to_pxr=crop_to_pxr,
-            real_img=real_img,
-        )
+        if fast_sweep:
+            # Exact for this renderer: attenuation_scale is the final scalar
+            # applied to the ray integral.
+            drr = (
+                base_drr
+                * float(attenuation_scale)
+            )
+        else:
+            drr = _prepare_registered_drr(
+                vol,
+                geometry,
+                float(attenuation_scale),
+                use_gpu,
+                row_chunk,
+                sample_chunk,
+                object_transform=transform,
+                crop_to_pxr=crop_to_pxr,
+                real_img=real_img,
+            )
 
         row = {
             "attenuation": float(
@@ -2329,7 +2329,7 @@ def sweep(
             ),
             "wasserstein_score": None,
             "ssim": None,
-            "ncc": None,
+            "cc": None,
             "psnr": None,
         }
 
@@ -2364,11 +2364,11 @@ def sweep(
                 )
             )
 
-            row["ncc"] = float(
+            row["cc"] = float(
                 compute_sweep_metric(
                     drr,
                     real_for_score,
-                    metric="ncc",
+                    metric="cc",
                     drr_mask=drr_mask,
                     pxr_mask=pxr_mask,
                 )
@@ -2392,23 +2392,19 @@ def sweep(
 
             print(
                 f"{label} Wasserstein score (1 - distance): "
-                f"{row['wasserstein_score']:.6f}  "
-
+                f"{row['wasserstein_score']:.6f}"
             )
             print(
                 f"{label} SSIM: "
-                f"{row['ssim']:.6f}  "
-            
+                f"{row['ssim']:.6f}"
             )
             print(
-                f"{label} NCC: "
-                f"{row['ncc']:.6f}  "
-            
+                f"{label} CC: "
+                f"{row['cc']:.6f}"
             )
             print(
                 f"{label} PSNR: "
-                f"{row['psnr']:.3f} dB  "
-            
+                f"{row['psnr']:.3f} dB"
             )
 
         results.append(row)
@@ -2432,6 +2428,9 @@ def sweep(
         # Avoid retaining full 3072 DRRs during a sweep.
         del drr
 
+    if base_drr is not None:
+        del base_drr
+
     csv_path = (
         out_dir
         / "attenuation_metrics.csv"
@@ -2451,7 +2450,7 @@ def sweep(
                 "attenuation",
                 "wasserstein_score",
                 "ssim",
-                "ncc",
+                "cc",
                 "psnr",
             ]
         )
@@ -2462,7 +2461,7 @@ def sweep(
                     row["attenuation"],
                     row["wasserstein_score"],
                     row["ssim"],
-                    row["ncc"],
+                    row["cc"],
                     row["psnr"],
                 ]
             )
@@ -2493,8 +2492,8 @@ def sweep(
             row["ssim"]
             for row in plot_rows
         ]
-        ncc_values = [
-            row["ncc"]
+        cc_values = [
+            row["cc"]
             for row in plot_rows
         ]
         psnr_values = [
@@ -2518,11 +2517,11 @@ def sweep(
             marker="o",
             label="SSIM",
         )
-        line_n, = ax1.plot(
+        line_c, = ax1.plot(
             attenuation_values,
-            ncc_values,
+            cc_values,
             marker="o",
-            label="NCC",
+            label="CC",
         )
 
         ax1.set_xlabel(
@@ -2557,7 +2556,7 @@ def sweep(
         for values, line in [
             (wasserstein_values, line_w),
             (ssim_values, line_s),
-            (ncc_values, line_n),
+            (cc_values, line_c),
         ]:
             best_idx = int(
                 np.argmax(values)
@@ -2588,7 +2587,7 @@ def sweep(
         lines = [
             line_w,
             line_s,
-            line_n,
+            line_c,
             line_p,
         ]
         ax1.legend(
@@ -2643,7 +2642,7 @@ def sweep(
         metric_labels = [
             ("wasserstein_score", "Wasserstein score"),
             ("ssim", "SSIM"),
-            ("ncc", "NCC"),
+            ("cc", "CC"),
             ("psnr", "PSNR"),
         ]
 
@@ -2664,6 +2663,9 @@ def sweep(
                 f"score={score_text}"
             )
 
+        print(
+            "\nAll reported sweep scores use HIGHER = BETTER."
+        )
 
     return results
 
@@ -2825,7 +2827,7 @@ def main():
         choices=[
             "ssim",
             "wasserstein",
-            "ncc",
+            "cc",
             "psnr",
             "mi",
         ],
@@ -2848,6 +2850,15 @@ def main():
     parser.add_argument(
         "--save-all-sweep",
         action="store_true",
+    )
+    parser.add_argument(
+        "--fast-sweep",
+        action="store_true",
+        help=(
+            "Compute the expensive ray integral once and reuse it for all "
+            "attenuation values. Exact for this renderer because "
+            "attenuation_scale is applied after ray integration."
+        ),
     )
 
     parser.add_argument(
@@ -3097,6 +3108,7 @@ def main():
             transform=transform,
             drr_mask=drr_mask,
             pxr_mask=pxr_mask,
+            fast_sweep=args.fast_sweep,
         )
 
         return
@@ -3162,7 +3174,7 @@ def main():
                 print(
                     f"{args.metric}: "
                     f"{current['score']:.6f} "
-    
+                    ""
                 )
 
         if args.metric == "wasserstein":

@@ -1,10 +1,9 @@
 """
 Clean up a real radiograph before calibration: mask out a bright
 band/artifact (which may be a straight horizontal edge OR a tilted
-diagonal edge unrelated to the trunk's own tilt), and optionally rotate
-to straighten the trunk separately. Doesn't touch the original file, and
-doesn't touch calibrate_drr.py, use the cleaned output as your --pxr
-input afterward.
+diagonal edge unrelated to the trunk's own tilt), and optionally flip
+the image vertically. Doesn't touch the original file, and doesn't touch
+calibrate_drr.py; use the cleaned output as your --pxr input afterward.
 
 TWO WAYS TO REMOVE THE BAND, pick whichever matches what you see:
 
@@ -20,9 +19,9 @@ TWO WAYS TO REMOVE THE BAND, pick whichever matches what you see:
    (set to 0, matching background convention) rather than cropped, since
    a diagonal boundary doesn't crop cleanly into a rectangle.
 
---rotate-deg is independent of both, use it separately if you also want
-to straighten the trunk itself. Order of operations: crop/mask first,
-then rotate, both applied to the same output if given together.
+--flip-vertical is independent of both. Order of operations: crop/mask
+first, then vertical flip, both applied to the same output if given
+together.
 
 Usage (diagonal mask example, band at bottom):
     python scripts/clean_portable_radio.py \
@@ -43,7 +42,6 @@ from pathlib import Path
 
 import numpy as np
 import tifffile as tiff
-from scipy.ndimage import rotate as scipy_rotate
 
 
 def apply_diagonal_inpaint(img: np.ndarray, x1, y1, x2, y2, side: str,
@@ -196,7 +194,7 @@ def apply_diagonal_mask(img: np.ndarray, x1, y1, x2, y2, side: str,
     return out
 
 
-def main(input_path, side, crop_px, diagonal_mask, mask_side, rotate_deg, output_path,
+def main(input_path, side, crop_px, diagonal_mask, mask_side, flip_vertical, output_path,
          feather_px=25.0, local_strip_px=150.0, method="fill", inpaint_radius=15):
     img = tiff.imread(input_path)
     print(f"Input:  shape={img.shape}  dtype={img.dtype}")
@@ -222,12 +220,9 @@ def main(input_path, side, crop_px, diagonal_mask, mask_side, rotate_deg, output
             img = apply_diagonal_mask(img, x1, y1, x2, y2, mask_side, feather_px=feather_px,
                                        local_strip_px=local_strip_px)
 
-    if rotate_deg is not None and rotate_deg != 0:
-        dtype = img.dtype
-        img = scipy_rotate(img.astype(np.float64), angle=rotate_deg, reshape=True,
-                            order=1, cval=0.0)
-        img = img.astype(dtype)
-        print(f"Rotated {rotate_deg} degrees, new shape={img.shape}")
+    if flip_vertical:
+        img = np.flipud(img).copy()
+        print(f"Flipped vertically, shape unchanged: {img.shape}")
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     tiff.imwrite(str(output_path), img)
@@ -267,9 +262,9 @@ if __name__ == "__main__":
                          help="inpainting radius in px (only used with --method inpaint), "
                               "how far around each masked pixel OpenCV looks for source "
                               "texture to extend inward")
-    parser.add_argument("--rotate-deg", type=float, default=None,
-                         help="degrees to rotate so the trunk is vertical, applied "
-                              "independently of crop/mask")
+    parser.add_argument("--flip-vertical", action="store_true",
+                         help="flip the image vertically (top <-> bottom) after "
+                              "crop/mask; left/right orientation is preserved")
     parser.add_argument("--output", required=True, help="path to save the cleaned copy")
     args = parser.parse_args()
 
@@ -280,6 +275,6 @@ if __name__ == "__main__":
             parser.error("--diagonal-mask needs exactly 4 comma-separated values: x1,y1,x2,y2")
         diag = parts
 
-    main(args.input, args.side, args.crop_px, diag, args.mask_side, args.rotate_deg,
+    main(args.input, args.side, args.crop_px, diag, args.mask_side, args.flip_vertical,
          args.output, args.feather_px, args.local_strip_px, args.method, args.inpaint_radius)
     
