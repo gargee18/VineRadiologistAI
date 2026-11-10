@@ -120,6 +120,8 @@ def run_masked_pair(
     real_mask,
     synthetic_mask,
     out_plot=None,
+    focus_min=None,
+    focus_max=None,
 ):
     """
     Compare the masked pixel-intensity distributions of one real PXR
@@ -207,40 +209,125 @@ def run_masked_pair(
         150,
     )
 
-    fig, ax = plt.subplots(
-        figsize=(8, 5)
-    )
+    # Optional full + zoomed view.
+    # The histogram is computed from the same masked pixels and the same bins;
+    # the right panel only changes the displayed axis limits.
+    use_focus = (focus_min is not None) or (focus_max is not None)
 
-    ax.hist(
-        real_pixels,
-        bins=bins,
-        density=True,
-        alpha=0.5,
-        label=f"PXR (n={len(real_pixels):,} pixels)",
-    )
+    if use_focus:
+        if focus_min is None or focus_max is None:
+            raise ValueError(
+                "Use --focus-min and --focus-max together."
+            )
 
-    ax.hist(
-        synthetic_pixels,
-        bins=bins,
-        density=True,
-        alpha=0.5,
-        label=f"DRR (n={len(synthetic_pixels):,} pixels)",
-    )
+        if not 0.0 <= focus_min < focus_max <= 1.0:
+            raise ValueError(
+                "Focus range must satisfy "
+                "0 <= focus_min < focus_max <= 1."
+            )
 
-    ax.set_xlabel(
-        "Pixel intensity (16-bit value / 65535)"
-    )
+        # Compute histogram densities once so the full and zoomed panels
+        # display exactly the same distributions.
+        real_hist, _ = np.histogram(
+            real_pixels,
+            bins=bins,
+            density=True,
+        )
 
-    ax.set_ylabel(
-        "Density"
-    )
+        synthetic_hist, _ = np.histogram(
+            synthetic_pixels,
+            bins=bins,
+            density=True,
+        )
 
-    ax.set_title(
-        "Masked pixel intensity distributions\n"
-        f"Wasserstein distance = {w_dist:.6f}"
-    )
+        bin_widths = np.diff(bins)
 
-    ax.legend()
+        fig, axes = plt.subplots(
+            1,
+            2,
+            figsize=(16, 5),
+        )
+
+        for ax in axes:
+            ax.bar(
+                bins[:-1],
+                real_hist,
+                width=bin_widths,
+                align="edge",
+                alpha=0.5,
+                label=f"PXR (n={len(real_pixels):,} pixels)",
+            )
+
+            ax.bar(
+                bins[:-1],
+                synthetic_hist,
+                width=bin_widths,
+                align="edge",
+                alpha=0.5,
+                label=f"DRR (n={len(synthetic_pixels):,} pixels)",
+            )
+
+            ax.set_xlabel(
+                "Pixel intensity (16-bit value / 65535)"
+            )
+            ax.set_ylabel("Density")
+            ax.legend()
+
+        axes[0].set_xlim(0.0, 1.0)
+        axes[0].set_title("Full intensity distribution")
+
+        axes[1].set_xlim(focus_min, focus_max)
+        axes[1].set_title(
+            f"Zoomed intensity range: "
+            f"{focus_min:.3f}-{focus_max:.3f}"
+        )
+
+        visible = (bins[:-1] < focus_max) & (bins[1:] > focus_min)
+
+        if np.any(visible):
+            zoom_peak = max(
+                float(real_hist[visible].max()),
+                float(synthetic_hist[visible].max()),
+            )
+
+            if zoom_peak > 0:
+                axes[1].set_ylim(0.0, zoom_peak * 1.1)
+
+        fig.suptitle(
+            "Masked pixel intensity distributions\n"
+            f"Wasserstein distance = {w_dist:.6f}"
+        )
+
+    else:
+        fig, ax = plt.subplots(
+            figsize=(8, 5)
+        )
+
+        ax.hist(
+            real_pixels,
+            bins=bins,
+            density=True,
+            alpha=0.5,
+            label=f"PXR (n={len(real_pixels):,} pixels)",
+        )
+
+        ax.hist(
+            synthetic_pixels,
+            bins=bins,
+            density=True,
+            alpha=0.5,
+            label=f"DRR (n={len(synthetic_pixels):,} pixels)",
+        )
+
+        ax.set_xlabel(
+            "Pixel intensity (16-bit value / 65535)"
+        )
+        ax.set_ylabel("Density")
+        ax.set_title(
+            "Masked pixel intensity distributions\n"
+            f"Wasserstein distance = {w_dist:.6f}"
+        )
+        ax.legend()
 
     plt.tight_layout()
 
@@ -717,6 +804,8 @@ def main(
     synthetic_mask=None,
     out_plot=None,
     out_dir=None,
+    focus_min=None,
+    focus_max=None,
 ):
     if (
         real_image
@@ -730,6 +819,8 @@ def main(
             real_mask=real_mask,
             synthetic_mask=synthetic_mask,
             out_plot=out_plot,
+            focus_min=focus_min,
+            focus_max=focus_max,
         )
 
     elif real_root and synthetic_root:
@@ -817,6 +908,27 @@ if __name__ == "__main__":
         help="Path to the DRR specimen mask.",
     )
 
+
+    parser.add_argument(
+        "--focus-min",
+        type=float,
+        default=None,
+        help=(
+            "Masked pair mode: lower x-axis limit for an optional "
+            "zoomed histogram panel, in normalized 0-1 intensity."
+        ),
+    )
+
+    parser.add_argument(
+        "--focus-max",
+        type=float,
+        default=None,
+        help=(
+            "Masked pair mode: upper x-axis limit for an optional "
+            "zoomed histogram panel, in normalized 0-1 intensity."
+        ),
+    )
+
     # Outputs
     parser.add_argument(
         "--out-plot",
@@ -846,4 +958,6 @@ if __name__ == "__main__":
         synthetic_mask=args.synthetic_mask,
         out_plot=args.out_plot,
         out_dir=args.out_dir,
+        focus_min=args.focus_min,
+        focus_max=args.focus_max,
     )

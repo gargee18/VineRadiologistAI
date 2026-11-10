@@ -31,10 +31,19 @@ CT_PATH = OUT_DIR / f"{SPECIMEN}_2026_XR.tif"
 PXR_PATH = OUT_DIR / f"{SPECIMEN}_2026_PXR.tif"
 
 TRANSFORM_PATH = OUT_DIR / f"{SPECIMEN}_transform_test.txt"
-REGISTRATION_INFO_PATH = OUT_DIR / f"{SPECIMEN}_registration_info_test.txt"
-PREVIEW_PATH = OUT_DIR / f"{SPECIMEN}_DRR_preview_test.tif"
-OVERLAY_PATH = OUT_DIR / f"{SPECIMEN}_PXR_DRR_overlay_test.tif"
+REGISTRATION_INFO_PATH = OUT_DIR / f"{SPECIMEN}_registration_info.txt"
+PREVIEW_PATH = OUT_DIR / f"{SPECIMEN}_DRR_preview.tif"
+OVERLAY_PATH = OUT_DIR / f"{SPECIMEN}_PXR_DRR_overlay.tif"
 FINAL_DRR_PATH = OUT_DIR / f"{SPECIMEN}_DRR_test.tif"
+
+# Resume an existing registration, or start from identity.
+# "ask" = ask in the terminal if a transform exists; "resume" = load it;
+# "new" = always start from identity, without touching existing files.
+START_POSE_MODE = "ask"
+
+# None: look for both the current *_transform_test.txt and the earlier
+# *_transform.txt for this specimen. Set a Path here to load a specific file.
+RESUME_TRANSFORM_PATH = None
 
 
 # =============================================================================
@@ -88,8 +97,7 @@ ROTATION_STEP_DEG = 0.5
 SID_MM = 1230.0
 SPD_MM = 800.0
 
-# CEP_1191
-OFFSET_V_MM = -20.0
+OFFSET_V_MM = 0.0
 OFFSET_U_MM = 0.0
 
 # Linear gain applied to the integrated attenuation.
@@ -1086,8 +1094,131 @@ def apply_rotation(axis, angle_rad):
     preview_event.set()
 
 
-# Explicitly start at identity pose.
-update_fiji_from_pose()
+def choose_starting_transform():
+    """Ask whether to resume, without silently choosing the wrong specimen pose."""
+    mode = START_POSE_MODE.strip().lower()
+    if mode not in {"ask", "resume", "new"}:
+        raise ValueError('START_POSE_MODE must be "ask", "resume", or "new"')
+    if mode == "new":
+        return None
+
+    if RESUME_TRANSFORM_PATH is not None:
+        candidates = [Path(RESUME_TRANSFORM_PATH)]
+    else:
+        candidates = list(dict.fromkeys([
+            TRANSFORM_PATH,
+            OUT_DIR / f"{SPECIMEN}_transform.txt",
+        ]))
+
+    existing = [p for p in candidates if p.is_file()]
+    if not existing:
+        if mode == "resume":
+            raise FileNotFoundError(
+                "Resume requested, but no transform exists at: "
+                + ", ".join(str(p) for p in candidates)
+            )
+        print(f"No existing transform for {SPECIMEN}; starting from identity.")
+        return None
+
+    if mode == "ask":
+        print("\nExisting registration transform(s):")
+        for i, path in enumerate(existing, 1):
+            print(f"  {i}. {path}")
+        while True:
+            answer = input("Resume registration from a saved transform? [y/n]: ").strip().lower()
+            if answer in {"n", "no"}:
+                print("Starting a new registration from identity.")
+                return None
+            if answer in {"y", "yes"}:
+                break
+            print("Please enter y or n.")
+
+    if len(existing) == 1:
+        return existing[0]
+
+    while True:
+        answer = input(f"Which transform to load? [1-{len(existing)}]: ").strip()
+        if answer.isdigit() and 1 <= int(answer) <= len(existing):
+            return existing[int(answer) - 1]
+        print("Enter the number of the desired transform.")
+
+
+def load_existing_registration(path):
+    """Recover the centered pose from the actual saved Fiji 4x4 matrix."""
+    global pose_R_xyz, pose_t_xyz
+
+    saved = np.loadtxt(path, dtype=np.float64)
+    if saved.shape != (4, 4) or not np.isfinite(saved).all():
+        raise ValueError(f"Invalid 4x4 transform: {path}")
+    if not np.allclose(saved[3], [0., 0., 0., 1.], atol=1e-6):
+        raise ValueError(f"Invalid homogeneous matrix last row: {path}")
+
+    R = saved[:3, :3].copy()
+    if (not np.allclose(R.T @ R, np.eye(3), atol=1e-4)
+            or not np.isclose(np.linalg.det(R), 1.0, atol=1e-4)):
+        raise ValueError(f"Transform rotation is not a proper rigid rotation: {path}")
+
+    sz, sy, sx = map(float, spacing_zyx)
+    nz, ny, nx = map(int, volume.shape)
+    volume_center_xyz = np.array(
+        [nx * sx / 2., ny * sy / 2., nz * sz / 2.], dtype=np.float64,
+    )
+    if not np.allclose(volume_center_xyz, viewer_center_xyz, atol=1e-3, rtol=0):
+        raise ValueError(
+            "Fiji CT center differs from renderer CT center. Check CT shape/"
+            "voxel-spacing metadata before restoring this transform."
+        )
+
+    # Saved matrix: p_out = R @ p + t_total.
+    # Manual pose:  p_out = R @ (p-center) + center + true_translation.
+    true_translation = R @ volume_center_xyz + saved[:3, 3] - volume_center_xyz
+    if SPD_MM + true_translation[2] <= 0:
+        raise ValueError("Saved Z translation places the CT at/behind the source")
+
+    # A sidecar written by the original manual script records initial SPD.
+    # Effective SPD already includes the physical Z translation: do not add it again.
+    if REGISTRATION_INFO_PATH.exists():
+        for line in REGISTRATION_INFO_PATH.read_text(encoding="utf-8").splitlines():
+            if line.strip().startswith("initial_spd_mm") and "=" in line:
+                previous_spd = float(line.split("=", 1)[1].strip())
+                if not np.isclose(previous_spd, SPD_MM, atol=1e-6):
+                    raise ValueError(
+                        f"Registration used initial SPD={previous_spd:g} mm, "
+                        f"but script uses SPD_MM={SPD_MM:g} mm. "
+                        "Use the original initial SPD when resuming."
+                    )
+                break
+
+    with pose_lock:
+        pose_R_xyz = R
+        pose_t_xyz = true_translation.copy()
+
+    update_fiji_from_pose()
+
+    # Verify that the pose recovered from Fiji after installing the matrix is
+    # the pose we loaded, before starting the first DRR or accepting movements.
+    restored_R, restored_t = sync_pose_from_fiji()
+    if (not np.allclose(restored_R, R, rtol=0, atol=1e-5)
+            or not np.allclose(restored_t, true_translation, rtol=0, atol=1e-3)):
+        raise RuntimeError(
+            "Fiji did not retain the loaded registration pose. "
+            "Stopping rather than rendering/saving an incorrect transform."
+        )
+
+    print(f"Resumed {SPECIMEN} from: {path}")
+    print("Restored physical XYZ translation (mm):", np.round(restored_t, 3))
+    print(f"Effective SPD: {effective_spd_mm(restored_t):.3f} mm "
+          f"(initial SPD={SPD_MM:g} mm)")
+    if path != TRANSFORM_PATH:
+        print(f"Press S to save the updated pose to: {TRANSFORM_PATH}")
+
+
+selected_transform = choose_starting_transform()
+if selected_transform is None:
+    # Original behavior: begin with the identity pose.
+    update_fiji_from_pose()
+else:
+    load_existing_registration(selected_transform)
 
 
 # =============================================================================
@@ -1416,7 +1547,7 @@ Desktop layout:
 All 2D images are automatically fit to their windows so the complete
 image is visible instead of opening overly zoomed-in.
 
-This run starts from a clean identity pose.
+This run starts from the selected saved transform (or identity if new).
 Mouse edits and keyboard edits are synchronized.
 Rotations are about the CT center, so they no longer create fake translation.
 
@@ -1475,8 +1606,8 @@ def physical_pose_changed(R, t):
     )
 
 
-# Render identity pose immediately. ENTER is no longer required to create
-# the first DRR window.
+# Render the chosen initial pose immediately (saved transform or identity).
+# ENTER is not required to create the first DRR window.
 preview_event.set()
 
 while not quit_event.is_set():
