@@ -21,7 +21,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 sys.path.insert(0, str(SCRIPT_DIR))
 
-SPECIMEN = "CEP_313B"
+SPECIMEN = "CEP_2184A"
 
 OUT_DIR = Path(
     "/home/phukon/Desktop/Ct_PXR_manual_registration"
@@ -30,16 +30,16 @@ OUT_DIR = Path(
 CT_PATH = OUT_DIR / f"{SPECIMEN}_2026_XR.tif"
 PXR_PATH = OUT_DIR / f"{SPECIMEN}_2026_PXR.tif"
 
-TRANSFORM_PATH = OUT_DIR / f"{SPECIMEN}_transform_test.txt"
+TRANSFORM_PATH = OUT_DIR / f"{SPECIMEN}_transform.txt"
 REGISTRATION_INFO_PATH = OUT_DIR / f"{SPECIMEN}_registration_info.txt"
 PREVIEW_PATH = OUT_DIR / f"{SPECIMEN}_DRR_preview.tif"
 OVERLAY_PATH = OUT_DIR / f"{SPECIMEN}_PXR_DRR_overlay.tif"
-FINAL_DRR_PATH = OUT_DIR / f"{SPECIMEN}_DRR_test.tif"
+FINAL_DRR_PATH = OUT_DIR / f"{SPECIMEN}_DRR.tif"
 
 # Resume an existing registration, or start from identity.
 # "ask" = ask in the terminal if a transform exists; "resume" = load it;
 # "new" = always start from identity, without touching existing files.
-START_POSE_MODE = "ask"
+START_POSE_MODE = "new"
 
 # None: look for both the current *_transform_test.txt and the earlier
 # *_transform.txt for this specimen. Set a Path here to load a specific file.
@@ -135,8 +135,8 @@ POSE_TRANS_ATOL_MM = 1e-4
 # Keep these between 0 and 1:
 #   lower = darker channel
 #   higher = brighter channel
-OVERLAY_PXR_GAIN = 0.55
-OVERLAY_DRR_GAIN = 0.55
+OVERLAY_PXR_GAIN = 0.6
+OVERLAY_DRR_GAIN = 0.9
 
 
 # =============================================================================
@@ -153,6 +153,7 @@ from calibrate_drr import (  # noqa: E402
     crop_top_to_match_pxr,
     detector_pixel_spacing,
     generate_drr,
+    log_attenuation_to_linear,
     make_geometry,
     save_drr_16bit,
 )
@@ -1833,13 +1834,15 @@ while not quit_event.is_set():
                     pxr_shape,
                 )
 
+                drr_linear = log_attenuation_to_linear(drr)
+
                 # IMPORTANT:
                 # Use the shared calibrate_drr.py saver here.
                 # This keeps the final manual-registration DRR numerically
                 # consistent with a DRR generated later by calibrate_drr.py.
                 save_drr_16bit(
                     FINAL_DRR_PATH,
-                    drr,
+                    drr_linear,
                     detector_pixel_spacing(FINAL_SIZE),
                 )
 
@@ -1850,7 +1853,7 @@ while not quit_event.is_set():
 
                 save_registration_overlay(
                     OVERLAY_PATH,
-                    drr,
+                    drr_linear,
                 )
 
                 show_or_update_overlay(
