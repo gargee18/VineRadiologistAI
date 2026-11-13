@@ -22,12 +22,14 @@ RUNS = [   # (name in the table, results folder)
     ("baseline (cropped)",       "results/training_baseline_cropped"),
     ("augmented, on the fly",    "results/training_augmented"),
     ("stored views + flip",      "results/training_stored"),
+    ("domain adaptation (λ 0.3)", "results/domain_adaptation/lam0.3"),
+    ("class balancing",          "results/training_stored_balanced"),
 ]
 TISSUES = [("healthy", "Healthy"), ("necrosis", "Necrosis"), ("white_rot", "White rot")]
 OUT_DIR = os.path.join(REPO, "results", "comparison")      # created if missing
 OUT = os.path.join(OUT_DIR, "compare_runs.csv")
 TISSUE_COLORS = ["#1B5E20", "#F9A825", "#B71C1C"]   # same as train_baseline.py
-RUN_COLORS = ["#C5CDD6", "#7D8FA3", "#2F4558"]      # light = first run, dark = latest
+RUN_COLORS = ["#DDE2E7", "#AEBBC8", "#7D8FA3", "#4C6177", "#1F2F40"]  # light = first run, dark = latest
 GROUP_COLORS = {"asymptomatic": "#1baf7a", "resistant": "#2a78d6",   # same as train_baseline.py
                 "symptomatic": "#eb6834", "apoplectic": "#7a3fa0"}
 
@@ -38,7 +40,7 @@ def plot_per_vine(vols, path):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    runs = [name for name, _ in RUNS]
+    runs = list(vols)                        # the runs that have results
     keys = [t for t, _ in TISSUES]
     by_run = {r: {v["vine"]: v for v in vols[r]} for r in runs}
     first = vols[runs[0]]
@@ -98,7 +100,7 @@ def plot(rows, path_scores, path_comp):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    runs = [name for name, _ in RUNS]
+    runs = list(dict.fromkeys(r["run"] for r in rows))   # the runs that have results
     tissues = [label for _, label in TISSUES]
     get = lambda run, tis, key: next(r[key] for r in rows if r["run"] == run and r["tissue"] == tis)
 
@@ -107,12 +109,13 @@ def plot(rows, path_scores, path_comp):
     panels = [("MAE_mm", "MAE (mm)", "%.1f"),
               ("Dice", "Dice", "%.2f"),
               ("share_error_pp", "Error in share of the wood\n(percentage points)", "%.1f")]
-    x = range(len(tissues)); w = 0.27
+    x = range(len(tissues)); w = 0.8 / len(runs)
     for a, (key, title, fmt) in zip(ax, panels):
         for k, run in enumerate(runs):
             vals = [get(run, t, key) for t in tissues]
-            bars = a.bar([i + (k - 1) * w for i in x], vals, w, color=RUN_COLORS[k], label=run)
-            a.bar_label(bars, [fmt % v for v in vals], fontsize=11, padding=2)
+            bars = a.bar([i + (k - (len(runs) - 1) / 2) * w for i in x], vals, w,
+                         color=RUN_COLORS[k], label=run)
+            a.bar_label(bars, [fmt % v for v in vals], fontsize=10, padding=2)
         a.set_xticks(list(x)); a.set_xticklabels(tissues, fontsize=14, fontweight="bold")
         for lab, c in zip(a.get_xticklabels(), TISSUE_COLORS):
             lab.set_color(c)
@@ -124,14 +127,14 @@ def plot(rows, path_scores, path_comp):
     ax[1].set_ylim(0, 1.08)
     h, l = ax[0].get_legend_handles_labels()
     try:
-        fig.legend(h, l, loc="outside lower center", ncol=3, fontsize=14, frameon=False)
+        fig.legend(h, l, loc="outside lower center", ncol=len(runs), fontsize=14, frameon=False)
     except ValueError:
         ax[0].legend(h, l, fontsize=12)
     fig.savefig(path_scores, dpi=110)
     plt.close(fig)
 
     # composition: true, then each run, stacked shares
-    fig, a = plt.subplots(figsize=(12, 5.5), layout="constrained")
+    fig, a = plt.subplots(figsize=(12, 3.5 + 0.6 * len(runs)), layout="constrained")
     labels = ["true"] + runs
     for i, lab in enumerate(labels):
         shares = [get(runs[0], t, "true_share_pct") if lab == "true" else get(lab, t, "pred_share_pct")
@@ -173,6 +176,10 @@ def main():
     rows, vols = [], {}
     for name, folder in RUNS:
         d = os.path.join(REPO, folder)
+        if not (os.path.exists(os.path.join(d, "summary_per_group.csv"))
+                and os.path.exists(os.path.join(d, "volume_per_vine.csv"))):
+            print(f"skip '{name}': no results yet in {folder} (train it, then --replot and --summarize)")
+            continue
         allrow = [r for r in read_csv(os.path.join(d, "summary_per_group.csv")) if r["group"] == "ALL"][0]
         vol = read_csv(os.path.join(d, "volume_per_vine.csv"))
         vols[name] = vol
@@ -200,13 +207,13 @@ def main():
             w.writerow({k: (f"{v:.3f}" if isinstance(v, float) else v) for k, v in r.items()})
 
     print("Mean over the test vines (each vine tested by a model that never saw it)\n")
-    head = (f"{'tissue':10s} {'run':24s} {'MAE mm':>7s} {'Dice':>5s} {'amount':>6s} "
+    head = (f"{'tissue':10s} {'run':27s} {'MAE mm':>7s} {'Dice':>5s} {'amount':>6s} "
             f"{'share true %':>12s} {'share pred %':>12s} {'|diff| pp':>9s} {'true cm3':>9s} {'pred cm3':>9s}")
     print(head); print("-" * len(head))
     for _, label in TISSUES:
         for r in rows:
             if r["tissue"] == label:
-                print(f"{label:10s} {r['run']:24s} {r['MAE_mm']:7.2f} {r['Dice']:5.2f} {r['amount']:6.2f} "
+                print(f"{label:10s} {r['run']:27s} {r['MAE_mm']:7.2f} {r['Dice']:5.2f} {r['amount']:6.2f} "
                       f"{r['true_share_pct']:12.1f} {r['pred_share_pct']:12.1f} {r['share_error_pp']:9.1f} "
                       f"{r['true_cm3']:9.0f} {r['pred_cm3']:9.0f}")
         print()

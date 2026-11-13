@@ -100,6 +100,9 @@ PAIRED_PXR = {
 DA_ROOT = os.path.join(REPO, "results", "domain_adaptation")   # everything of this script
 
 
+POT_CROP_CSV = os.path.join(DA_ROOT, "pot_crop", "pot_crop_rows.csv")
+
+
 def out_dir(lam):
     return os.path.join(DA_ROOT, f"lam{lam:g}")
 
@@ -115,22 +118,57 @@ def d1_split():
     return [v for v in vines if v not in held], held
 
 
+# vines with more PXRs than the usual 3: keep only these (CEP_1181 was X-rayed
+# from more angles; keep the registered one and the two taken with it)
+PXR_KEEP = {
+    "1181": ["69ca6a532ad9c81239913234.tif", "69ca6a542ad9c81239913235.tif",
+             "69ca6a542ad9c81239913236.tif"],
+}
+
+
 def pxr_files(v):
-    """All 2026 PXRs of a vine (not the line_integral files)."""
+    """The 2026 PXRs of a vine (not the line_integral files; PXR_KEEP if listed)."""
     fs = sorted(glob.glob(os.path.join(PXR_ROOT, f"CEP_{v}", "*.tif")))
-    return [f for f in fs if "line_integral" not in os.path.basename(f)]
+    fs = [f for f in fs if "line_integral" not in os.path.basename(f)]
+    if v in PXR_KEEP:
+        fs = [f for f in fs if os.path.basename(f) in PXR_KEEP[v]]
+    return fs
+
+
+_POT_CUTS = None
+
+
+def pot_cut(path):
+    """Row where the pot starts (from find_pot_crop.py), or None = keep all.
+    Rows from the cut down (pot, soil) are dropped before normalizing."""
+    global _POT_CUTS
+    if _POT_CUTS is None:
+        _POT_CUTS = {}
+        if os.path.exists(POT_CROP_CSV):
+            with open(POT_CROP_CSV) as f:
+                for r in csv.DictReader(f):
+                    if r["cut_row"] != "":
+                        _POT_CUTS[r["file"]] = int(r["cut_row"])
+            print(f"  pot crop: {len(_POT_CUTS)} cut rows from {POT_CROP_CSV}")
+        else:
+            print(f"  pot crop: {POT_CROP_CSV} not found, D1 images are NOT cropped "
+                  "(run training/find_pot_crop.py)")
+    return _POT_CUTS.get(os.path.basename(path))
 
 
 def load_d1_drr(v):
-    """Registered linear DRR -> the same DRR->PXR curve as D2 -> normalize."""
-    raw = np.nan_to_num(tifffile.imread(D1_DRR_PATTERN.format(v=v)).astype(np.float32))
+    """Registered linear DRR -> pot cut -> the same DRR->PXR curve as D2 -> normalize."""
+    path = D1_DRR_PATTERN.format(v=v)
+    raw = np.nan_to_num(tifffile.imread(path).astype(np.float32))
     if raw.max() > 1.5:                     # stored as 16-bit (0..65535)
         raw = raw / 65535.0
+    raw = raw[:pot_cut(path)]               # [:None] keeps everything
     return tb.normalize(augment.apply_curve(raw).astype(np.float32))
 
 
 def load_pxr(path):
-    return tb.normalize(np.nan_to_num(tifffile.imread(path).astype(np.float32)))
+    raw = np.nan_to_num(tifffile.imread(path).astype(np.float32))
+    return tb.normalize(raw[:pot_cut(path)])
 
 
 def otsu(img):
@@ -414,6 +452,8 @@ def eval_d1(run_dir):
     for v in held:
         drr = load_d1_drr(v)
         pxr = load_pxr(os.path.join(PXR_ROOT, f"CEP_{v}", PAIRED_PXR[v]))
+        h = min(drr.shape[0], pxr.shape[0])          # pot cuts can differ by a few rows
+        drr, pxr = drr[:h], pxr[:h]
         mask = vine_mask(drr)
         p_d, p_p = [], []
         for mp in models:

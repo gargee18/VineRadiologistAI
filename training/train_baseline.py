@@ -106,6 +106,13 @@ AUG_CROP_MARGIN = 256    # views are kept cropped to the vine + this margin (px)
 # ---- stored views (only with --stored; see training/make_views.py) --------
 VIEWS_DIR = "/mnt/e823c70f-4136-47c9-91be-1ca7901a37b5/gargee/d2_views"   # other disk, ~83 GB
 OUT_DIR_STORED = os.path.join(REPO, "results", "training_stored")
+# ---- class balancing (only with --balance, which needs --stored) ----------
+OUT_DIR_BALANCED = os.path.join(REPO, "results", "training_stored_balanced")
+BALANCE_WR_PROB = 0.3    # share of patches centred on a white rot pixel
+BALANCE_POWER = 0.5      # loss weight of a tissue = (1 / its mean thickness) ** power,
+                         # scaled to a mean of 1. 0.5 = square root (mild), 1 = full
+WR_POINTS = 20000        # white rot pixels kept per view for patch centring
+_WR_PROB = 0.0           # set by run_fold: 0 = no white rot centring (all earlier runs)
 FLIP_LR = True           # --stored only: flip each training patch left-right
                          # with probability 0.5 (test images are never flipped)
 # Where checkpoints, metrics and preview images are written.
@@ -194,11 +201,18 @@ def pad_to(arr, h, w):
     return np.pad(arr, pad)
 
 
-def random_patch(img, lab, fg_pts=None):
+def random_patch(img, lab, fg_pts=None, wr_pts=None):
     """fg_pts: (N, 2) vine pixels, given for stored views (memory-mapped
-    uint16 / float16 arrays); None = find them in lab, as before."""
+    uint16 / float16 arrays); None = find them in lab, as before.
+    wr_pts: (N, 2) white rot pixels, only with --balance: a share _WR_PROB of
+    the patches is centred on one of them."""
     img, lab = pad_to(img, PATCH, PATCH), pad_to(lab, PATCH, PATCH)
     H, W = img.shape
+    if wr_pts is not None and len(wr_pts) and random.random() < _WR_PROB:
+        cy, cx = wr_pts[random.randrange(len(wr_pts))]
+        y0 = int(np.clip(cy - PATCH // 2, 0, H - PATCH))
+        x0 = int(np.clip(cx - PATCH // 2, 0, W - PATCH))
+        return _cut_patch(img, lab, y0, x0)
     if fg_pts is None:
         fg = lab.sum(0) > 0
         has_fg = fg.any()
@@ -215,11 +229,35 @@ def random_patch(img, lab, fg_pts=None):
         x0 = int(np.clip(cx - PATCH // 2, 0, W - PATCH))
     else:
         y0, x0 = random.randint(0, H - PATCH), random.randint(0, W - PATCH)
+    return _cut_patch(img, lab, y0, x0)
+
+
+def _cut_patch(img, lab, y0, x0):
     x = img[y0:y0 + PATCH, x0:x0 + PATCH]
     y = lab[:, y0:y0 + PATCH, x0:x0 + PATCH]
     if x.dtype == np.uint16:                     # stored view
         x = x.astype(np.float32) / 65535.0
     return x.astype(np.float32, copy=False), y.astype(np.float32, copy=False)
+
+
+def white_rot_points(lab, seed):
+    """Up to WR_POINTS pixels with white rot thicker than DICE_THR_MM."""
+    pts = np.argwhere(np.asarray(lab[2], dtype=np.float32) > DICE_THR_MM).astype(np.int32)
+    if len(pts) > WR_POINTS:
+        pts = pts[np.random.default_rng(seed).choice(len(pts), WR_POINTS, replace=False)]
+    return pts
+
+
+def class_weights(labs):
+    """Loss weight per tissue from the training labels: (1 / mean thickness
+    inside the vine) ** BALANCE_POWER, scaled to a mean of 1."""
+    tot = np.zeros(len(CLASSES)); n = 0
+    for lab in labs:
+        vine = lab.sum(0) > 0
+        tot += lab[:, vine].sum(1); n += vine.sum()
+    mean = tot / max(n, 1)
+    w = (1.0 / np.maximum(mean, 1e-6)) ** BALANCE_POWER
+    return w / w.mean(), mean
 
 
 def batch_iter(data, flip_lr=False):
@@ -509,7 +547,8 @@ def height_profile(specimen, gt, pred, bin_mm=PROFILE_BIN_MM, smooth_cm=PROFILE_
     rows = np.flatnonzero(vine.any(1))
     if rows.size == 0:
         return {"specimen": specimen, "group": group_of(specimen),
-                "height_mm": np.zeros(0), "true": np.zeros((3, 0)), "pred": np.zeros((3, 0))}
+                "height_mm": np.zeros(0), "true": np.zeros((3, 0)), "pred": np.zeros((3, 0)),
+                "true_amount": np.zeros((3, 0)), "pred_amount": np.zeros((3, 0))}
     bottom = rows.max()
     px_mm = DET_PIXEL_MM * SPD_MM / SID_MM                     # pixel size at the vine
     t_row = np.stack([np.where(vine, gt[c], 0).sum(1) for c in range(len(CLASSES))])   # (3, H)
@@ -521,6 +560,7 @@ def height_profile(specimen, gt, pred, bin_mm=PROFILE_BIN_MM, smooth_cm=PROFILE_
     T = np.zeros((3, nb)); P = np.zeros((3, nb))
     for c in range(len(CLASSES)):
         np.add.at(T[c], b, t_row[c][keep]); np.add.at(P[c], b, p_row[c][keep])
+    T_raw, P_raw = T.copy(), P.copy()          # unsmoothed amounts, for the correlations
     if smooth_cm > 0:
         sigma = smooth_cm * 10.0 / bin_mm
         T = gaussian_filter1d(T, sigma, axis=1, mode="nearest")
@@ -531,7 +571,29 @@ def height_profile(specimen, gt, pred, bin_mm=PROFILE_BIN_MM, smooth_cm=PROFILE_
         ts = np.where(ok, 100 * T / T.sum(0, keepdims=True), np.nan)
         ps = np.where(ok, 100 * P / P.sum(0, keepdims=True), np.nan)
     return {"specimen": specimen, "group": group_of(specimen),
-            "height_mm": (np.arange(nb) + 0.5) * bin_mm, "true": ts, "pred": ps}
+            "height_mm": (np.arange(nb) + 0.5) * bin_mm, "true": ts, "pred": ps,
+            "true_amount": np.where(ok, T_raw, np.nan), "pred_amount": np.where(ok, P_raw, np.nan)}
+
+
+PROFILE_PAIRS = [(0, 1, "healthy–necrosis"), (0, 2, "healthy–white rot"), (1, 2, "necrosis–white rot")]
+
+
+def profile_correlations(sel, key):
+    """Spearman r between the amounts of two tissues along the trunk, pooled
+    over the height bins of the vines in sel. Amounts (summed thickness per
+    height, unsmoothed), not shares: shares add up to 100% at every height,
+    which would make the healthy-disease correlation negative by construction."""
+    out = {}
+    for i, j, name in PROFILE_PAIRS:
+        x = np.concatenate([p[key][i] for p in sel if p.get(key) is not None])
+        y = np.concatenate([p[key][j] for p in sel if p.get(key) is not None])
+        ok = np.isfinite(x) & np.isfinite(y)
+        if ok.sum() < 5 or np.ptp(x[ok]) == 0 or np.ptp(y[ok]) == 0:
+            out[name] = np.nan
+            continue
+        rx = np.argsort(np.argsort(x[ok])); ry = np.argsort(np.argsort(y[ok]))
+        out[name] = float(np.corrcoef(rx, ry)[0, 1])
+    return out
 
 
 def save_profiles(profiles, path, title="Wood composition along the trunk"):
@@ -571,8 +633,11 @@ def save_profiles(profiles, path, title="Wood composition along the trunk"):
             ok = np.isfinite(t)
             if ok.any():
                 top = max(top, h_cm[ok].max())
-        a.set(xlim=(0, 100), xlabel="share of the wood (%)",
-              title=f"{g} ({len(sel)} vine{'s' if len(sel) > 1 else ''})")
+        rt, rp = profile_correlations(sel, "true_amount"), profile_correlations(sel, "pred_amount")
+        corr = "\n".join(f"{n}:  {rt[n]:+.2f} true,  {rp[n]:+.2f} pred." for _, _, n in PROFILE_PAIRS)
+        a.set(xlim=(0, 100), title=f"{g} ({len(sel)} vine{'s' if len(sel) > 1 else ''})")
+        a.set_xlabel("share of the wood (%)\n\nSpearman r along the trunk (amounts):\n" + corr,
+                     fontsize=9.5)
         if k == 0:
             a.set_ylabel("height above the bottom of the vine (cm)")
         a.grid(alpha=0.25)
@@ -863,9 +928,10 @@ def make_augmented_set(train_specimens, round_idx, fold_dir, epoch):
     return views
 
 
-def load_stored_views(train_specimens):
+def load_stored_views(train_specimens, with_wr=False):
     """Stored views of the TRAINING vines only, memory-mapped (read from disk
-    patch by patch). Made by training/make_views.py."""
+    patch by patch). Made by training/make_views.py. with_wr (--balance): also
+    the white rot pixels of each view, computed once and cached as *_wr.npy."""
     import time
     t0 = time.perf_counter()
     views = []
@@ -879,14 +945,25 @@ def load_stored_views(train_specimens):
             fg = np.load(ip.replace("_img.npy", "_fg.npy"))
             if img.shape[0] < PATCH or img.shape[1] < PATCH:   # too small: pad in RAM
                 img, lab = pad_to(np.asarray(img), PATCH, PATCH), pad_to(np.asarray(lab), PATCH, PATCH)
-            views.append((img, lab, fg))
+            if with_wr:
+                wp = ip.replace("_img.npy", "_wr.npy")
+                if os.path.exists(wp):
+                    wr = np.load(wp)
+                else:
+                    wr = white_rot_points(lab, len(views))
+                    np.save(wp, wr)
+                views.append((img, lab, fg, wr))
+            else:
+                views.append((img, lab, fg))
     print(f"  stored views: {len(views)} from {len(train_specimens)} vines "
           f"({time.perf_counter() - t0:.0f} s)")
     return views
 
 
-def run_fold(test_specimens, all_specimens, augment_on=False, stored_on=False):
+def run_fold(test_specimens, all_specimens, augment_on=False, stored_on=False, balance_on=False):
+    global _WR_PROB
     random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED)
+    _WR_PROB = BALANCE_WR_PROB if balance_on else 0.0
     train_specimens = [s for s in all_specimens if s not in test_specimens]
     fold_dir = os.path.join(OUT_DIR, "fold_" + "_".join(test_specimens))
     os.makedirs(fold_dir, exist_ok=True)
@@ -897,8 +974,20 @@ def run_fold(test_specimens, all_specimens, augment_on=False, stored_on=False):
     print(f"  {len(train_pairs)} train images, {len(test_pairs)} test images")
     originals = [load_pair(d, l) for _, d, l in train_pairs]
     train_data = list(originals)          # the batch generator reads this list
+    weights = None
+    if balance_on:
+        w, mean = class_weights([lab for _, lab in originals])
+        weights = torch.tensor(w, dtype=torch.float32, device=DEVICE).view(1, -1, 1, 1)
+        train_data = [(img, lab, None, white_rot_points(lab, i)) for i, (img, lab) in enumerate(originals)]
+        info = {"mean_thickness_mm": dict(zip(CLASSES, mean.round(3).tolist())),
+                "loss_weight": dict(zip(CLASSES, w.round(3).tolist())),
+                "power": BALANCE_POWER, "white_rot_patch_share": BALANCE_WR_PROB}
+        with open(os.path.join(fold_dir, "balance.json"), "w") as f:
+            json.dump(info, f, indent=2)
+        print(f"  class balancing: loss weights {info['loss_weight']}, "
+              f"{BALANCE_WR_PROB:.0%} of patches centred on white rot")
     if stored_on:
-        train_data += load_stored_views(train_specimens)
+        train_data += load_stored_views(train_specimens, with_wr=balance_on)
         print(f"  + the {len(originals)} original views; left-right flip "
               f"{'on' if FLIP_LR else 'off'}")
     if augment_on:
@@ -919,20 +1008,23 @@ def run_fold(test_specimens, all_specimens, augment_on=False, stored_on=False):
             train_data[:] = originals + make_augmented_set(
                 train_specimens, ep // AUG_EVERY_EPOCHS, fold_dir, ep)
         model.train()
-        total = 0.0
+        total = total_w = 0.0
         for _ in range(STEPS_PER_EPOCH):
             x, y = next(batches)
             x, y = x.to(DEVICE), y.to(DEVICE)
             with torch.autocast(device_type="cuda", enabled=use_amp):
-                loss = F.l1_loss(forward(model, x), y)
+                err = (forward(model, x) - y).abs()
+                l1 = err.mean()                                  # plain L1, as in every run
+                loss = (err * weights).mean() if weights is not None else l1
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
-            total += loss.item()
+            total += l1.item(); total_w += loss.item()
         sched.step()
-        losses.append(total / STEPS_PER_EPOCH)
-        print(f"  epoch {ep + 1:3d}/{EPOCHS}  train L1 = {losses[-1]:.4f} mm")
+        losses.append(total / STEPS_PER_EPOCH)                   # plain L1: comparable across runs
+        extra = f"  (weighted {total_w / STEPS_PER_EPOCH:.4f})" if weights is not None else ""
+        print(f"  epoch {ep + 1:3d}/{EPOCHS}  train L1 = {losses[-1]:.4f} mm{extra}")
 
     torch.save(model.state_dict(), os.path.join(fold_dir, "model.pt"))
     save_loss(losses, fold_dir)
@@ -1037,6 +1129,10 @@ def main():
                     help="train with the views stored by training/make_views.py, plus a "
                          "left-right flip; results go to OUT_DIR_STORED. Also give it to "
                          "--summarize / --replot of those results.")
+    ap.add_argument("--balance", action="store_true",
+                    help="with --stored: class balancing (white rot patch sampling + loss "
+                         "weights per tissue); results go to OUT_DIR_BALANCED. Also give it "
+                         "to --summarize / --replot of those results.")
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--test", nargs="+", help="specimen names to hold out")
     g.add_argument("--all-folds", action="store_true",
@@ -1052,6 +1148,10 @@ def main():
         OUT_DIR = OUT_DIR_AUG
     if args.stored:
         OUT_DIR = OUT_DIR_STORED
+    if args.balance:
+        if not args.stored:
+            raise SystemExit("--balance works on top of --stored: give both.")
+        OUT_DIR = OUT_DIR_BALANCED
     os.makedirs(OUT_DIR, exist_ok=True)
     print(f"results folder: {OUT_DIR}")
 
@@ -1069,9 +1169,11 @@ def main():
         missing = [s for s in args.test if s not in specimens]
         if missing:
             raise SystemExit(f"Not found in DRR_ROOT: {missing}")
-        run_fold(args.test, specimens, augment_on=args.augment, stored_on=args.stored)
+        run_fold(args.test, specimens, augment_on=args.augment, stored_on=args.stored,
+                 balance_on=args.balance)
     else:
-        results = [run_fold([s], specimens, augment_on=args.augment, stored_on=args.stored)
+        results = [run_fold([s], specimens, augment_on=args.augment, stored_on=args.stored,
+                            balance_on=args.balance)
                    for s in specimens]
         overall = mean_metrics([r["mean"] for r in results])
         with open(os.path.join(OUT_DIR, "all_folds.json"), "w") as f:
