@@ -16,6 +16,10 @@ Same U-Net and D2 training as `train_baseline.py --stored`, plus:
     together, so they count equally. lambda scales the reversed gradient
     that reaches the encoder; it rises from 0 to LAMBDA_MAX during training
     (standard DANN schedule).
+Pot and soil (D1): the images are not cropped. The top of the soil, clicked
+per image with mark_soil.py (results/domain_adaptation/soil/soil_lines.csv),
+marks what lies below as ignored: no patch is centred there, the domain loss
+leaves those locations out, and --eval-d1 leaves those pixels out.
 The classifiers are only used for training. model.pt holds the plain U-Net,
 so --replot, --summarize and compare_runs.py work on it as on any other run.
 
@@ -73,6 +77,8 @@ N_D1_PXR = 8                 # PXR patches per step
 D1_HELD_OUT_N = 5
 D1_SPLIT_SEED = 0
 FG_POINTS = 20000            # vine pixels kept per D1 image for patch centring
+USE_D1_VIEWS = True          # also train on the stored augmented D1 DRRs
+                             # (make_views.py --d1, then --d1 --soil)
 CLF_STAGES = (1024, 2048)    # encoder stages the classifiers look at (channels)
 STAGE_NAME = {1024: "stage3", 2048: "stage4"}
 FOLDS = [                    # same folds as the earlier runs
@@ -100,11 +106,15 @@ PAIRED_PXR = {
 DA_ROOT = os.path.join(REPO, "results", "domain_adaptation")   # everything of this script
 
 
-POT_CROP_CSV = os.path.join(DA_ROOT, "pot_crop", "pot_crop_rows.csv")
+SOIL_CSV = os.path.join(DA_ROOT, "soil", "soil_lines.csv")      # from mark_soil.py
 
 
 def out_dir(lam):
-    return os.path.join(DA_ROOT, f"lam{lam:g}")
+    """lam0.3 = the first run (soil not ignored); lam0.3_soil once soil lines exist,
+    so a new run never overwrites the earlier results."""
+    tag = "_soil" if os.path.exists(SOIL_CSV) else ""
+    tag += "_d1aug" if USE_D1_VIEWS else ""
+    return os.path.join(DA_ROOT, f"lam{lam:g}{tag}")
 
 
 # =========================================================================
@@ -135,40 +145,46 @@ def pxr_files(v):
     return fs
 
 
-_POT_CUTS = None
+_SOIL = None
 
 
-def pot_cut(path):
-    """Row where the pot starts (from find_pot_crop.py), or None = keep all.
-    Rows from the cut down (pot, soil) are dropped before normalizing."""
-    global _POT_CUTS
-    if _POT_CUTS is None:
-        _POT_CUTS = {}
-        if os.path.exists(POT_CROP_CSV):
-            with open(POT_CROP_CSV) as f:
+def soil_row(path):
+    """Top of the soil (clicked with mark_soil.py), or None = no soil. The image
+    is NOT cropped: from this row down (soil, pot) is only ignored: no patch is
+    centred there, the domain loss leaves it out, and so does --eval-d1."""
+    global _SOIL
+    if _SOIL is None:
+        _SOIL = {}
+        if os.path.exists(SOIL_CSV):
+            with open(SOIL_CSV) as f:
                 for r in csv.DictReader(f):
-                    if r["cut_row"] != "":
-                        _POT_CUTS[r["file"]] = int(r["cut_row"])
-            print(f"  pot crop: {len(_POT_CUTS)} cut rows from {POT_CROP_CSV}")
+                    if r["soil_row"] != "":
+                        _SOIL[r["file"]] = int(r["soil_row"])
+            print(f"  soil: {len(_SOIL)} soil lines from {SOIL_CSV}")
         else:
-            print(f"  pot crop: {POT_CROP_CSV} not found, D1 images are NOT cropped "
-                  "(run training/find_pot_crop.py)")
-    return _POT_CUTS.get(os.path.basename(path))
+            print(f"  soil: {SOIL_CSV} not found, soil and pot are NOT ignored "
+                  "(run training/mark_soil.py)")
+    return _SOIL.get(os.path.basename(path))
 
 
 def load_d1_drr(v):
-    """Registered linear DRR -> pot cut -> the same DRR->PXR curve as D2 -> normalize."""
-    path = D1_DRR_PATTERN.format(v=v)
-    raw = np.nan_to_num(tifffile.imread(path).astype(np.float32))
+    """Registered linear DRR -> the same DRR->PXR curve as D2 -> normalize."""
+    raw = np.nan_to_num(tifffile.imread(D1_DRR_PATTERN.format(v=v)).astype(np.float32))
     if raw.max() > 1.5:                     # stored as 16-bit (0..65535)
         raw = raw / 65535.0
-    raw = raw[:pot_cut(path)]               # [:None] keeps everything
     return tb.normalize(augment.apply_curve(raw).astype(np.float32))
 
 
 def load_pxr(path):
-    raw = np.nan_to_num(tifffile.imread(path).astype(np.float32))
-    return tb.normalize(raw[:pot_cut(path)])
+    return tb.normalize(np.nan_to_num(tifffile.imread(path).astype(np.float32)))
+
+
+def above_soil(shape, soil):
+    """Pixels above the soil line (all True if no soil line)."""
+    ok = np.ones(shape, bool)
+    if soil is not None:
+        ok[soil:] = False
+    return ok
 
 
 def otsu(img):
@@ -185,48 +201,89 @@ def vine_mask(img):
     return img > otsu(img)
 
 
-def with_fg(img, seed):
-    fg = np.argwhere(vine_mask(img)).astype(np.int32)
+def with_fg(img, seed, soil=None):
+    """(img, vine pixels above the soil, soil row) for patch sampling."""
+    fg = np.argwhere(vine_mask(img) & above_soil(img.shape, soil)).astype(np.int32)
     if len(fg) > FG_POINTS:
         fg = fg[np.random.default_rng(seed).choice(len(fg), FG_POINTS, replace=False)]
-    return img, fg
+    return img, fg, soil
 
 
 def d1_patches(data, n, noise=False):
-    """n patches from a list of (img, fg) D1 images, same sampling as D2
-    (FG_PROB centred on the vine), random left-right flip; noise=True adds
-    the same 2D noise as the D2 views (for the D1 DRRs)."""
-    xs = []
+    """n patches from a list of (img, fg, soil) D1 images, same sampling as D2
+    (FG_PROB centred on the vine, never on the soil), random left-right flip;
+    noise=True adds the same 2D noise as the D2 views (for the D1 DRRs).
+    Returns the patches and, per patch, which of its rows are above the soil."""
+    xs, rows_ok = [], []
     for _ in range(n):
-        img, fg = random.choice(data)
-        x = _patch(img, fg)
+        img, fg, soil = random.choice(data)
+        x, y0 = _patch(img, fg, soil)
         if noise:
             x = x + np.random.normal(0.0, random.uniform(*augment.NOISE_STD), x.shape).astype(np.float32)
         if random.random() < 0.5:
-            x = x[:, ::-1]
+            x = x[:, ::-1]                       # left-right: rows unchanged
         xs.append(np.ascontiguousarray(x)[None])
-    return torch.from_numpy(np.stack(xs))
+        r = np.arange(y0, y0 + tb.PATCH)
+        rows_ok.append(r < soil if soil is not None else np.ones(tb.PATCH, bool))
+    return torch.from_numpy(np.stack(xs)), torch.from_numpy(np.stack(rows_ok))
 
 
-def _patch(img, fg):
+def _patch(img, fg, soil=None):
+    """A patch and its top row. Random (non-centred) patches are drawn with
+    their centre above the soil line too."""
     P = tb.PATCH
     img = tb.pad_to(img, P, P)
     H, W = img.shape
     if random.random() < tb.FG_PROB and len(fg):
         cy, cx = fg[random.randrange(len(fg))]
-        y0 = int(np.clip(cy - P // 2, 0, H - P)); x0 = int(np.clip(cx - P // 2, 0, W - P))
     else:
-        y0, x0 = random.randint(0, H - P), random.randint(0, W - P)
-    return img[y0:y0 + P, x0:x0 + P].astype(np.float32)
+        top = H if soil is None else max(min(soil, H), 1)
+        cy, cx = random.randrange(top), random.randrange(W)
+    y0 = int(np.clip(cy - P // 2, 0, H - P)); x0 = int(np.clip(cx - P // 2, 0, W - P))
+    x = img[y0:y0 + P, x0:x0 + P]
+    if x.dtype == np.uint16:                     # stored view
+        return x.astype(np.float32) / 65535.0, y0
+    return x.astype(np.float32), y0
 
 
 def load_d1_train(vines):
     drrs, pxrs = [], []
     for i, v in enumerate(vines):
-        drrs.append(with_fg(load_d1_drr(v), i))
+        p = D1_DRR_PATTERN.format(v=v)
+        drrs.append(with_fg(load_d1_drr(v), i, soil_row(p)))
         for j, f in enumerate(pxr_files(v)):
-            pxrs.append(with_fg(load_pxr(f), 1000 * i + j))
+            pxrs.append(with_fg(load_pxr(f), 1000 * i + j, soil_row(f)))
+    if USE_D1_VIEWS:
+        drrs += load_d1_views(vines)
     return drrs, pxrs
+
+
+def load_d1_views(vines):
+    """Stored augmented D1 DRRs of these vines, memory-mapped, with the vine
+    pixels and soil rows written by make_views.py --d1 --soil."""
+    import resource
+    import make_views
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)   # one open file per view
+    resource.setrlimit(resource.RLIMIT_NOFILE, (min(hard, 65536), hard))
+    root = make_views.D1_VIEWS_DIR
+    soil_csv = os.path.join(root, "soil_rows.csv")
+    if not os.path.exists(soil_csv):
+        raise SystemExit(f"{soil_csv} not found: run make_views.py --d1 --soil first")
+    with open(soil_csv) as f:
+        soil = {(r["vine"], int(r["view"])): (int(r["soil_row"]) if r["soil_row"] else None)
+                for r in csv.DictReader(f)}
+    views = []
+    for v in vines:
+        imgs = sorted(glob.glob(os.path.join(root, f"CEP_{v}", "*_img.npy")))
+        if not imgs:
+            raise SystemExit(f"No stored D1 views for CEP_{v} in {root}")
+        for ip in imgs:
+            k = int(os.path.basename(ip).split("_")[0])
+            views.append((np.load(ip, mmap_mode="r"),
+                          np.load(ip.replace("_img.npy", "_fg.npy")),
+                          soil[(f"CEP_{v}", k)]))
+    print(f"  D1 stored views: {len(views)} from {len(vines)} vines")
+    return views
 
 
 # =========================================================================
@@ -292,14 +349,23 @@ def check_split_forward(model):
     model.train()
 
 
-def domain_loss(logits, n_sim):
+def domain_loss(logits, n_sim, rows_ok=None):
     """BCE per location; simulated (first n_sim, target 0) and real (target 1)
-    averaged separately, then together. Also returns the balanced accuracy."""
+    averaged separately, then together. Also returns the balanced accuracy.
+    rows_ok (B, PATCH): rows above the soil; a location counts only if all the
+    patch rows it covers are above the soil."""
+    B, _, h, w = logits.shape
+    if rows_ok is None:
+        m = torch.ones_like(logits)
+    else:
+        cell = rows_ok.view(B, h, -1).all(-1)                       # (B, h)
+        m = cell[:, None, :, None].expand(B, 1, h, w).float()
     t = torch.zeros_like(logits); t[n_sim:] = 1
     l = F.binary_cross_entropy_with_logits(logits.float(), t, reduction="none")
-    loss = 0.5 * (l[:n_sim].mean() + l[n_sim:].mean())
-    pred = logits.detach() > 0
-    acc = 0.5 * ((~pred[:n_sim]).float().mean() + pred[n_sim:].float().mean())
+    mean = lambda x, mm: (x * mm).sum() / mm.sum().clamp(min=1)
+    loss = 0.5 * (mean(l[:n_sim], m[:n_sim]) + mean(l[n_sim:], m[n_sim:]))
+    pred = (logits.detach() > 0).float()
+    acc = 0.5 * (mean(1 - pred[:n_sim], m[:n_sim]) + mean(pred[n_sim:], m[n_sim:]))
     return loss, acc.item()
 
 
@@ -344,15 +410,17 @@ def run_fold(test_specimens, all_specimens, lam_max):
         for _ in range(tb.STEPS_PER_EPOCH):
             lam = lambda_at(step, total_steps, lam_max)
             x2, y2 = next(d2_batches)
-            x = torch.cat([x2, d1_patches(d1_drr, N_D1_DRR, noise=True),
-                           d1_patches(d1_pxr, N_D1_PXR)]).to(tb.DEVICE)
+            xs, ok_s = d1_patches(d1_drr, N_D1_DRR, noise=True)
+            xr, ok_r = d1_patches(d1_pxr, N_D1_PXR)
+            x = torch.cat([x2, xs, xr]).to(tb.DEVICE)
+            rows_ok = torch.cat([torch.ones(len(x2), tb.PATCH, dtype=torch.bool), ok_s, ok_r]).to(tb.DEVICE)
             y2 = y2.to(tb.DEVICE)
             with torch.autocast(device_type="cuda", enabled=use_amp):
                 pred, stage = split_forward(model, x, n_lab)
                 l1 = F.l1_loss(pred, y2)
                 dom = 0.0
                 for c in CLF_STAGES:
-                    d, acc = domain_loss(clfs[str(c)](stage[c], lam), n_sim)
+                    d, acc = domain_loss(clfs[str(c)](stage[c], lam), n_sim, rows_ok)
                     dom = dom + d
                     s_acc[c] += acc
                 loss = l1 + dom
@@ -423,9 +491,14 @@ def check_d1():
         ax[0, k].imshow(im, cmap="gray", vmin=0, vmax=1); ax[0, k].set_title(t, fontsize=14)
         ax[0, k].contour(vine_mask(im), levels=[0.5], colors="#F9A825", linewidths=0.8)
         ax[0, k].set_xticks([]); ax[0, k].set_yticks([])
-        m = vine_mask(im)
+        soil = None if k == 0 else soil_row(D1_DRR_PATTERN.format(v=v) if k == 1 else
+                                            os.path.join(PXR_ROOT, f"CEP_{v}", PAIRED_PXR[v]))
+        if soil is not None:
+            ax[0, k].axhline(soil, color="#E53935", lw=1.5)
+            ax[0, k].axhspan(soil, im.shape[0], color="#E53935", alpha=0.15)
+        m = vine_mask(im) & above_soil(im.shape, soil)
         ax[1, k].hist(im[m], bins=100, range=(0, 1), color="#2F4558")
-        ax[1, k].set_title("histogram inside the vine (yellow outline)", fontsize=12)
+        ax[1, k].set_title("histogram inside the vine, above the soil (red)", fontsize=12)
         ax[1, k].set_xlabel("normalized intensity")
     fig.suptitle("Check before domain adaptation: same polarity (wood bright?), similar range, "
                  "vine outline correct?", fontsize=15, fontweight="bold")
@@ -452,9 +525,9 @@ def eval_d1(run_dir):
     for v in held:
         drr = load_d1_drr(v)
         pxr = load_pxr(os.path.join(PXR_ROOT, f"CEP_{v}", PAIRED_PXR[v]))
-        h = min(drr.shape[0], pxr.shape[0])          # pot cuts can differ by a few rows
-        drr, pxr = drr[:h], pxr[:h]
-        mask = vine_mask(drr)
+        pxr_path = os.path.join(PXR_ROOT, f"CEP_{v}", PAIRED_PXR[v])
+        mask = (vine_mask(drr) & above_soil(drr.shape, soil_row(D1_DRR_PATTERN.format(v=v)))
+                & above_soil(drr.shape, soil_row(pxr_path)))          # soil of either image left out
         p_d, p_p = [], []
         for mp in models:
             m = tb.load_model(mp); m.eval()
@@ -555,6 +628,10 @@ def main():
         run_fold(args.test, specimens, args.lambda_max)
     elif args.folds:
         for fold in FOLDS:
+            done = os.path.join(tb.OUT_DIR, "fold_" + "_".join(fold), "metrics.json")
+            if os.path.exists(done):            # finished in an earlier (crashed) run
+                print(f"\n=== fold {fold}: already done, skipped")
+                continue
             run_fold(fold, specimens, args.lambda_max)
     else:
         ap.print_help()
