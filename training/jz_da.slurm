@@ -24,6 +24,8 @@ source $WORK/vrai_env/bin/activate        # venv made with --system-site-package
 
 export VRAI_REPO=$WORK/VineRadiologistAI
 export VRAI_VIEWS=$SCRATCH/vrai/d2_views  # d1_views must sit next to it: $SCRATCH/vrai/d1_views
+export HF_HUB_OFFLINE=1                   # GPU nodes have no internet: ResNet-50 weights come
+                                          # from the cache filled once on the login node
 cd $VRAI_REPO
 
 FOLDS=(
