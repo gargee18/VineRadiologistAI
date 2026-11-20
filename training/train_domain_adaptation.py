@@ -80,6 +80,19 @@ FG_POINTS = 20000            # vine pixels kept per D1 image for patch centring
 USE_D1_VIEWS = True          # also train on the stored augmented D1 DRRs
                              # (make_views.py --d1, then --d1 --soil)
 CLF_STAGES = (1024, 2048)    # encoder stages the classifiers look at (channels)
+# --method contrastive: instead of the domain classifier, the registered DRR and its
+# real PXR give positive pairs (same patch location); other pairs in the batch are
+# negatives (InfoNCE on the pooled stage-4 features, through a projection head)
+CONTRAST_WEIGHT = 0.3        # weight of the contrastive loss, ramped up like lambda
+CONTRAST_TEMP = 0.1          # InfoNCE temperature
+N_PAIRS = 8                  # DRR/PXR patch pairs per step (8 DRR + 8 PXR patches)
+PAIRS_PER_VINE = 2           # pairs from the same vine per step (different places), so
+                             # the model cannot match a pair just by recognising the vine
+# --method mmd: the encoder directly shrinks the Maximum Mean Discrepancy between
+# the pooled features of the simulated patches (D2 + D1 DRR) and the real PXR
+# patches, at the same stages as the domain classifier (as in DRR4Covid)
+MMD_WEIGHT = 0.3             # weight of the MMD loss, ramped up like lambda
+MMD_SCALES = (0.25, 0.5, 1.0, 2.0, 4.0)   # Gaussian kernels, x the median distance
 STAGE_NAME = {1024: "stage3", 2048: "stage4"}
 FOLDS = [                    # same folds as the earlier runs
     ["CEP011_AS1", "CEP014_RES1", "CEP017_S1", "CEP020_APO1"],
@@ -109,10 +122,16 @@ DA_ROOT = os.path.join(REPO, "results", "domain_adaptation")   # everything of t
 SOIL_CSV = os.path.join(DA_ROOT, "soil", "soil_lines.csv")      # from mark_soil.py
 
 
-def out_dir(lam):
+def out_dir(lam, method="adversarial"):
     """lam0.3 = the first run (soil not ignored); lam0.3_soil once soil lines exist,
-    so a new run never overwrites the earlier results."""
+    so a new run never overwrites the earlier results. Contrastive runs:
+    contrast0.3_soil_bal (the stored D1 views are not used: they have no PXR)."""
     tag = "_soil" if os.path.exists(SOIL_CSV) else ""
+    if method == "contrastive":
+        return os.path.join(DA_ROOT, f"contrast{CONTRAST_WEIGHT:g}{tag}_bal")
+    if method == "mmd":
+        tag += "_d1aug" if USE_D1_VIEWS else ""
+        return os.path.join(DA_ROOT, f"mmd{MMD_WEIGHT:g}{tag}_bal")
     tag += "_d1aug" if USE_D1_VIEWS else ""
     tag += "_bal"                                   # class balancing, always on
     return os.path.join(DA_ROOT, f"lam{lam:g}{tag}")
@@ -302,6 +321,112 @@ class GradReverse(torch.autograd.Function):
         return -ctx.lam * g, None
 
 
+def load_d1_pairs(vines):
+    """(registered DRR, its paired real PXR, vine pixels, soil row) per vine.
+    The DRR was rendered with the registration and cropped to the PXR, so both
+    images are aligned pixel for pixel (up to the registration error)."""
+    pairs = []
+    for v in vines:
+        drr_path = D1_DRR_PATTERN.format(v=v)
+        pxr_path = os.path.join(PXR_ROOT, f"CEP_{v}", PAIRED_PXR[v])
+        drr, pxr = load_d1_drr(v), load_pxr(pxr_path)
+        if drr.shape != pxr.shape:
+            print(f"  CEP_{v}: DRR {drr.shape} and PXR {pxr.shape} differ, pair skipped")
+            continue
+        sd, sp = soil_row(drr_path), soil_row(pxr_path)
+        soil = min([x for x in (sd, sp) if x is not None], default=None)
+        fg = np.argwhere(vine_mask(drr) & above_soil(drr.shape, soil)).astype(np.int32)
+        if len(fg) == 0:
+            continue
+        pairs.append((drr, pxr, fg, soil))
+    return pairs
+
+
+def pair_patches(pairs, n):
+    """n patch pairs: n / PAIRS_PER_VINE vines, PAIRS_PER_VINE places on each
+    (at least half a patch apart), the same window of the DRR (with noise) and
+    of its PXR, centred on the vine, same flip. Wrong answers from the same vine
+    force the model to look at the wood in the patch, not at which vine it is.
+    Returns DRR patches, PXR patches and the rows above the soil (both images)."""
+    P = tb.PATCH
+    k = max(n // PAIRS_PER_VINE, 1)
+    vines = random.sample(pairs, k) if len(pairs) >= k else [random.choice(pairs) for _ in range(k)]
+    chosen = []
+    for pr in vines:
+        fg = pr[2]
+        centres = []
+        for _ in range(PAIRS_PER_VINE):
+            for _try in range(20):                       # a place away from the previous ones
+                c = fg[random.randrange(len(fg))]
+                if all(max(abs(int(c[0]) - a), abs(int(c[1]) - b)) >= P // 2 for a, b in centres):
+                    break
+            centres.append((int(c[0]), int(c[1])))
+            chosen.append((pr, centres[-1]))
+    chosen = chosen[:n]
+    xd, xp, rows_ok = [], [], []
+    for (drr, pxr, fg, soil), (cy, cx) in chosen:
+        H, W = drr.shape
+        y0 = int(np.clip(cy - P // 2, 0, H - P)); x0 = int(np.clip(cx - P // 2, 0, W - P))
+        a = drr[y0:y0 + P, x0:x0 + P].astype(np.float32)
+        a = a + np.random.normal(0.0, random.uniform(*augment.NOISE_STD), a.shape).astype(np.float32)
+        b = pxr[y0:y0 + P, x0:x0 + P].astype(np.float32)
+        if random.random() < 0.5:
+            a, b = a[:, ::-1], b[:, ::-1]
+        xd.append(np.ascontiguousarray(a)[None]); xp.append(np.ascontiguousarray(b)[None])
+        r = np.arange(y0, y0 + P)
+        rows_ok.append(r < soil if soil is not None else np.ones(P, bool))
+    return (torch.from_numpy(np.stack(xd)), torch.from_numpy(np.stack(xp)),
+            torch.from_numpy(np.stack(rows_ok)))
+
+
+def masked_pool(feat, rows_ok):
+    """Average a (B, C, h, w) feature map over the rows above the soil -> (B, C)."""
+    f = feat.float()
+    h = f.shape[2]
+    m = rows_ok[:, ::tb.PATCH // h][:, :h].float().view(len(f), 1, h, 1)
+    return (f * m).sum((2, 3)) / (m.sum((2, 3)) * f.shape[3]).clamp(min=1.0)
+
+
+def mmd_loss(z, n_sim):
+    """Squared Maximum Mean Discrepancy between z[:n_sim] (simulated) and
+    z[n_sim:] (real), sum of Gaussian kernels whose widths are MMD_SCALES x the
+    median pairwise distance (biased estimate)."""
+    d = torch.cdist(z, z).pow(2)
+    med = d[d > 0].median().detach() if (d > 0).any() else d.new_tensor(1.0)
+    k = sum(torch.exp(-d / (s * med)) for s in MMD_SCALES)
+    xx, yy, xy = k[:n_sim, :n_sim], k[n_sim:, n_sim:], k[:n_sim, n_sim:]
+    return xx.mean() + yy.mean() - 2 * xy.mean()
+
+
+class ProjectionHead(nn.Module):
+    """Pooled 2048-channel stage-4 features -> 128-d unit vector (used only for the loss)."""
+    def __init__(self, ch=2048):
+        super().__init__()
+        self.net = nn.Sequential(nn.Linear(ch, 512), nn.ReLU(inplace=True), nn.Linear(512, 128))
+
+    def forward(self, z):
+        return F.normalize(self.net(z), dim=1)
+
+
+def contrastive_loss(head, feat, start, n, rows_ok):
+    """InfoNCE between the DRR patches feat[start:start+n] and the PXR patches
+    feat[start+n:start+2n]: patch i of the DRR must match patch i of the PXR.
+    Features are averaged over the rows above the soil. Returns the loss and
+    the share of pairs matched correctly (chance = 1/n)."""
+    f = feat[start:start + 2 * n].float()
+    h = f.shape[2]
+    m = rows_ok[:, ::tb.PATCH // h][:, :h].float()                       # (n, h)
+    m = torch.cat([m, m]).view(2 * n, 1, h, 1)
+    z = (f * m).sum((2, 3)) / (m.sum((2, 3)) * f.shape[3]).clamp(min=1.0)
+    z = head(z)
+    zd, zp = z[:n], z[n:]
+    logits = zd @ zp.t() / CONTRAST_TEMP
+    target = torch.arange(n, device=logits.device)
+    loss = 0.5 * (F.cross_entropy(logits, target) + F.cross_entropy(logits.t(), target))
+    acc = (logits.argmax(1) == target).float().mean().item()
+    return loss, acc
+
+
 class DomainClassifier(nn.Module):
     """Per-location: one simulated/real logit for every location of the map."""
     def __init__(self, ch):
@@ -374,12 +499,14 @@ def domain_loss(logits, n_sim, rows_ok=None):
 # TRAINING
 # =========================================================================
 
-def run_fold(test_specimens, all_specimens, lam_max):
+def run_fold(test_specimens, all_specimens, lam_max, method="adversarial"):
     random.seed(tb.SEED); np.random.seed(tb.SEED); torch.manual_seed(tb.SEED)
     train_specimens = [s for s in all_specimens if s not in test_specimens]
     fold_dir = os.path.join(tb.OUT_DIR, "fold_" + "_".join(test_specimens))
     os.makedirs(fold_dir, exist_ok=True)
-    print(f"\n=== test: {test_specimens}   train: {train_specimens}   lambda_max {lam_max}")
+    print(f"\n=== test: {test_specimens}   train: {train_specimens}   method {method}, "
+          + {"adversarial": f"lambda_max {lam_max}", "contrastive": f"weight {CONTRAST_WEIGHT}",
+             "mmd": f"weight {MMD_WEIGHT}"}[method])
 
     # D2: stored augmented views + flip + class balancing (always on), as
     # train_baseline.py --stored --balance
@@ -400,13 +527,23 @@ def run_fold(test_specimens, all_specimens, lam_max):
 
     # D1
     d1_train, d1_held = d1_split()
-    d1_drr, d1_pxr = load_d1_train(d1_train)
-    print(f"  D1: {len(d1_drr)} DRRs + {len(d1_pxr)} PXRs from {len(d1_train)} vines; "
-          f"held out: {d1_held}")
+    if method == "contrastive":
+        pairs = load_d1_pairs(d1_train)
+        print(f"  D1: {len(pairs)} registered DRR/PXR pairs from {len(d1_train)} vines; "
+              f"held out: {d1_held}")
+    else:
+        d1_drr, d1_pxr = load_d1_train(d1_train)
+        print(f"  D1: {len(d1_drr)} DRRs + {len(d1_pxr)} PXRs from {len(d1_train)} vines; "
+              f"held out: {d1_held}")
 
     model = tb.build_model().to(tb.DEVICE)
     check_split_forward(model)
-    clfs = nn.ModuleDict({str(c): DomainClassifier(c) for c in CLF_STAGES}).to(tb.DEVICE)
+    if method == "contrastive":
+        clfs = nn.ModuleDict({"head": ProjectionHead()}).to(tb.DEVICE)
+    elif method == "mmd":
+        clfs = nn.ModuleDict()                      # no extra network
+    else:
+        clfs = nn.ModuleDict({str(c): DomainClassifier(c) for c in CLF_STAGES}).to(tb.DEVICE)
     opt = torch.optim.AdamW(list(model.parameters()) + list(clfs.parameters()), lr=tb.LR)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, tb.EPOCHS)
     use_amp = tb.DEVICE == "cuda"
@@ -421,12 +558,17 @@ def run_fold(test_specimens, all_specimens, lam_max):
         s_l1 = s_dom = 0.0
         s_acc = {c: 0.0 for c in CLF_STAGES}
         for _ in range(tb.STEPS_PER_EPOCH):
-            lam = lambda_at(step, total_steps, lam_max)
             x2, y2 = next(d2_batches)
-            xs, ok_s = d1_patches(d1_drr, N_D1_DRR, noise=True)
-            xr, ok_r = d1_patches(d1_pxr, N_D1_PXR)
+            if method == "contrastive":
+                lam = lambda_at(step, total_steps, CONTRAST_WEIGHT)
+                xs, xr, ok_pair = pair_patches(pairs, N_PAIRS)
+                rows_ok = ok_pair.to(tb.DEVICE)
+            else:
+                lam = lambda_at(step, total_steps, MMD_WEIGHT if method == "mmd" else lam_max)
+                xs, ok_s = d1_patches(d1_drr, N_D1_DRR, noise=True)
+                xr, ok_r = d1_patches(d1_pxr, N_D1_PXR)
+                rows_ok = torch.cat([torch.ones(len(x2), tb.PATCH, dtype=torch.bool), ok_s, ok_r]).to(tb.DEVICE)
             x = torch.cat([x2, xs, xr]).to(tb.DEVICE)
-            rows_ok = torch.cat([torch.ones(len(x2), tb.PATCH, dtype=torch.bool), ok_s, ok_r]).to(tb.DEVICE)
             y2 = y2.to(tb.DEVICE)
             with torch.autocast(device_type="cuda", enabled=use_amp):
                 pred, stage = split_forward(model, x, n_lab)
@@ -434,10 +576,20 @@ def run_fold(test_specimens, all_specimens, lam_max):
                 l1 = err.mean()                          # plain L1, logged (comparable across runs)
                 l1_w = (err * weights).mean()            # class-balanced L1, trained on
                 dom = 0.0
-                for c in CLF_STAGES:
-                    d, acc = domain_loss(clfs[str(c)](stage[c], lam), n_sim, rows_ok)
-                    dom = dom + d
-                    s_acc[c] += acc
+                if method == "contrastive":
+                    con, acc = contrastive_loss(clfs["head"], stage[2048], n_lab, N_PAIRS, rows_ok)
+                    dom = lam * con
+                    s_acc[2048] += acc
+                elif method == "mmd":
+                    for c in CLF_STAGES:                # logged per stage in the acc columns
+                        m = mmd_loss(masked_pool(stage[c], rows_ok), n_sim)
+                        dom = dom + lam * m
+                        s_acc[c] += m.item()
+                else:
+                    for c in CLF_STAGES:
+                        d, acc = domain_loss(clfs[str(c)](stage[c], lam), n_sim, rows_ok)
+                        dom = dom + d
+                        s_acc[c] += acc
                 loss = l1_w + dom
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
@@ -460,7 +612,7 @@ def run_fold(test_specimens, all_specimens, lam_max):
     with open(os.path.join(fold_dir, "training_log.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(log[0])); w.writeheader(); w.writerows(log)
     tb.save_loss([r["train_L1_mm"] for r in log], fold_dir)
-    save_domain_plot(log, fold_dir)
+    save_domain_plot(log, fold_dir, method)
 
     summary, _, _ = tb.evaluate_fold(model, test_specimens, train_specimens, fold_dir)
     print("  D2 test results (mean over test images):")
@@ -470,8 +622,34 @@ def run_fold(test_specimens, all_specimens, lam_max):
     return summary
 
 
-def save_domain_plot(log, fold_dir):
+def save_domain_plot(log, fold_dir, method="adversarial"):
     plt = tb._plt()
+    if method == "mmd":
+        ep = [r["epoch"] for r in log]
+        fig, ax = plt.subplots(1, 2, figsize=(14, 5), layout="constrained")
+        ax[0].plot(ep, [r["domain_loss"] for r in log], color="#2F4558", lw=2)
+        ax[0].set_title("MMD loss (weighted, stage 3 + stage 4)", fontsize=14); ax[0].set_xlabel("epoch")
+        for c, col in zip(CLF_STAGES, ("#7D8FA3", "#2F4558")):
+            ax[1].plot(ep, [r[f"domain_acc_{STAGE_NAME[c]}"] for r in log], color=col, lw=2,
+                       label=STAGE_NAME[c].replace("stage", "stage "))
+        ax[1].legend()
+        ax[1].set_title("MMD between simulated and real (lower = closer)", fontsize=14)
+        ax[1].set_xlabel("epoch")
+        fig.savefig(os.path.join(fold_dir, "domain_training.png"), dpi=100)
+        plt.close(fig)
+        return
+    if method == "contrastive":
+        ep = [r["epoch"] for r in log]
+        fig, ax = plt.subplots(1, 2, figsize=(14, 5), layout="constrained")
+        ax[0].plot(ep, [r["domain_loss"] for r in log], color="#2F4558", lw=2)
+        ax[0].set_title("Contrastive loss (weighted)", fontsize=14); ax[0].set_xlabel("epoch")
+        ax[1].plot(ep, [r["domain_acc_stage4"] for r in log], color="#2F4558", lw=2)
+        ax[1].axhline(1 / N_PAIRS, color="#B71C1C", ls="--", lw=1, label=f"chance (1/{N_PAIRS})")
+        ax[1].set_ylim(0, 1.0); ax[1].legend()
+        ax[1].set_title("DRR/PXR pairs matched correctly", fontsize=14); ax[1].set_xlabel("epoch")
+        fig.savefig(os.path.join(fold_dir, "domain_training.png"), dpi=100)
+        plt.close(fig)
+        return
     ep = [r["epoch"] for r in log]
     fig, ax = plt.subplots(1, 2, figsize=(14, 5), layout="constrained")
     ax[0].plot(ep, [r["domain_loss"] for r in log], color="#2F4558", lw=2)
@@ -728,6 +906,9 @@ def save_d1_figure(v, drr, pxr, p_d, p_p, mask, row, path, ref=None):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--lambda-max", type=float, default=LAMBDA_MAX)
+    ap.add_argument("--method", choices=["adversarial", "contrastive", "mmd"], default="adversarial",
+                    help="domain adaptation: domain classifier (default), DRR/PXR contrastive "
+                         "pairs, or MMD between simulated and real features")
     ap.add_argument("--test", nargs="+", help="test vines of one fold")
     ap.add_argument("--folds", action="store_true", help="train the 3 usual folds, one after another")
     ap.add_argument("--summarize", action="store_true")
@@ -739,7 +920,7 @@ def main():
                     help="predicted maps of one D1 vine at yaw 0, 30, 60 and 90 degrees")
     args = ap.parse_args()
 
-    tb.OUT_DIR = out_dir(args.lambda_max)
+    tb.OUT_DIR = out_dir(args.lambda_max, args.method)
     os.makedirs(tb.OUT_DIR, exist_ok=True)
     train, held = d1_split()
     with open(os.path.join(tb.OUT_DIR, "d1_split.txt"), "w") as f:
@@ -757,14 +938,14 @@ def main():
         tb.replot(); return
     specimens = tb.list_specimens()
     if args.test:
-        run_fold(args.test, specimens, args.lambda_max)
+        run_fold(args.test, specimens, args.lambda_max, args.method)
     elif args.folds:
         for fold in FOLDS:
             done = os.path.join(tb.OUT_DIR, "fold_" + "_".join(fold), "metrics.json")
             if os.path.exists(done):            # finished in an earlier (crashed) run
                 print(f"\n=== fold {fold}: already done, skipped")
                 continue
-            run_fold(fold, specimens, args.lambda_max)
+            run_fold(fold, specimens, args.lambda_max, args.method)
     else:
         ap.print_help()
 
