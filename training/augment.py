@@ -41,7 +41,7 @@ import time
 import numpy as np
 import tifffile
 
-REPO = "/mnt/41d6c007-0c9e-41e2-b2eb-8d9c032e9e53/gargee/code_python/VineRadiologistAI"
+REPO = os.environ.get("VRAI_REPO", "/mnt/41d6c007-0c9e-41e2-b2eb-8d9c032e9e53/gargee/code_python/VineRadiologistAI")
 sys.path.insert(0, os.path.join(REPO, "scripts"))
 from calibrate_drr import make_geometry, generate_drr, CUPY_AVAILABLE  # noqa: E402
 from VineRadiologist.io import load_volume                               # noqa: E402

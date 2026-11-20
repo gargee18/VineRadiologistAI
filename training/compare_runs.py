@@ -24,12 +24,16 @@ RUNS = [   # (name in the table, results folder)
     ("stored views + flip",      "results/training_stored"),
     ("domain adaptation (λ 0.3)", "results/domain_adaptation/lam0.3"),
     ("class balancing",          "results/training_stored_balanced"),
+    ("domain adaptation, soil ignored", "results/domain_adaptation/lam0.3_soil"),
+    ("DA, soil ignored + D1 augmentation", "results/domain_adaptation/lam0.3_soil_d1aug"),
+    ("same, λ 0.1", "results/domain_adaptation/lam0.1_soil_d1aug"),
+    ("same, λ 1", "results/domain_adaptation/lam1_soil_d1aug"),
 ]
 TISSUES = [("healthy", "Healthy"), ("necrosis", "Necrosis"), ("white_rot", "White rot")]
 OUT_DIR = os.path.join(REPO, "results", "comparison")      # created if missing
 OUT = os.path.join(OUT_DIR, "compare_runs.csv")
 TISSUE_COLORS = ["#1B5E20", "#F9A825", "#B71C1C"]   # same as train_baseline.py
-RUN_COLORS = ["#DDE2E7", "#AEBBC8", "#7D8FA3", "#4C6177", "#1F2F40"]  # light = first run, dark = latest
+RUN_COLORS = ["#E3E7EB", "#CAD2DA", "#B1BCC8", "#98A6B5", "#7F90A3", "#667B91", "#4E657E", "#36506B", "#1F2F40"]  # light = first run, dark = latest
 GROUP_COLORS = {"asymptomatic": "#1baf7a", "resistant": "#2a78d6",   # same as train_baseline.py
                 "symptomatic": "#eb6834", "apoplectic": "#7a3fa0"}
 
@@ -207,13 +211,13 @@ def main():
             w.writerow({k: (f"{v:.3f}" if isinstance(v, float) else v) for k, v in r.items()})
 
     print("Mean over the test vines (each vine tested by a model that never saw it)\n")
-    head = (f"{'tissue':10s} {'run':27s} {'MAE mm':>7s} {'Dice':>5s} {'amount':>6s} "
+    head = (f"{'tissue':10s} {'run':32s} {'MAE mm':>7s} {'Dice':>5s} {'amount':>6s} "
             f"{'share true %':>12s} {'share pred %':>12s} {'|diff| pp':>9s} {'true cm3':>9s} {'pred cm3':>9s}")
     print(head); print("-" * len(head))
     for _, label in TISSUES:
         for r in rows:
             if r["tissue"] == label:
-                print(f"{label:10s} {r['run']:27s} {r['MAE_mm']:7.2f} {r['Dice']:5.2f} {r['amount']:6.2f} "
+                print(f"{label:10s} {r['run']:32s} {r['MAE_mm']:7.2f} {r['Dice']:5.2f} {r['amount']:6.2f} "
                       f"{r['true_share_pct']:12.1f} {r['pred_share_pct']:12.1f} {r['share_error_pp']:9.1f} "
                       f"{r['true_cm3']:9.0f} {r['pred_cm3']:9.0f}")
         print()

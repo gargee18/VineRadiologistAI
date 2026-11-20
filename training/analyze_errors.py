@@ -89,6 +89,10 @@ DESCRIPTIONS = {
     "training_stored": "3D augmentation, 1200 stored views + left-right flip",
     "lam0.3": "Domain adaptation (λ = 0.3), stored views + flip",
     "training_stored_balanced": "Class balancing (white rot sampling + loss weights), stored views + flip",
+    "lam0.3_soil": "Domain adaptation (λ = 0.3), soil ignored, stored views + flip",
+    "lam0.3_soil_d1aug": "Domain adaptation (λ = 0.3), soil ignored, stored D2 + D1 views + flip",
+    "lam0.1_soil_d1aug": "Domain adaptation (λ = 0.1), soil ignored, stored D2 + D1 views + flip",
+    "lam1_soil_d1aug": "Domain adaptation (λ = 1), soil ignored, stored D2 + D1 views + flip",
 }
 
 

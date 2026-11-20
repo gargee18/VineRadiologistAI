@@ -114,6 +114,7 @@ def out_dir(lam):
     so a new run never overwrites the earlier results."""
     tag = "_soil" if os.path.exists(SOIL_CSV) else ""
     tag += "_d1aug" if USE_D1_VIEWS else ""
+    tag += "_bal"                                   # class balancing, always on
     return os.path.join(DA_ROOT, f"lam{lam:g}{tag}")
 
 
@@ -380,10 +381,22 @@ def run_fold(test_specimens, all_specimens, lam_max):
     os.makedirs(fold_dir, exist_ok=True)
     print(f"\n=== test: {test_specimens}   train: {train_specimens}   lambda_max {lam_max}")
 
-    # D2, exactly as --stored
+    # D2: stored augmented views + flip + class balancing (always on), as
+    # train_baseline.py --stored --balance
     originals = [tb.load_pair(d, l) for _, d, l in tb.list_pairs(train_specimens)]
-    d2_data = originals + tb.load_stored_views(train_specimens)
+    w, mean = tb.class_weights([lab for _, lab in originals])
+    weights = torch.tensor(w, dtype=torch.float32, device=tb.DEVICE).view(1, -1, 1, 1)
+    tb._WR_PROB = tb.BALANCE_WR_PROB
+    d2_data = [(img, lab, None, tb.white_rot_points(lab, i)) for i, (img, lab) in enumerate(originals)]
+    d2_data += tb.load_stored_views(train_specimens, with_wr=True)
     d2_batches = tb.batch_iter(d2_data, flip_lr=tb.FLIP_LR)
+    info = {"mean_thickness_mm": dict(zip(tb.CLASSES, mean.round(3).tolist())),
+            "loss_weight": dict(zip(tb.CLASSES, w.round(3).tolist())),
+            "power": tb.BALANCE_POWER, "white_rot_patch_share": tb.BALANCE_WR_PROB}
+    with open(os.path.join(fold_dir, "balance.json"), "w") as f:
+        json.dump(info, f, indent=2)
+    print(f"  D2: {len(d2_data)} views, flip {'on' if tb.FLIP_LR else 'off'}, class balancing: "
+          f"loss weights {info['loss_weight']}, {tb.BALANCE_WR_PROB:.0%} of patches on white rot")
 
     # D1
     d1_train, d1_held = d1_split()
@@ -417,13 +430,15 @@ def run_fold(test_specimens, all_specimens, lam_max):
             y2 = y2.to(tb.DEVICE)
             with torch.autocast(device_type="cuda", enabled=use_amp):
                 pred, stage = split_forward(model, x, n_lab)
-                l1 = F.l1_loss(pred, y2)
+                err = (pred - y2).abs()
+                l1 = err.mean()                          # plain L1, logged (comparable across runs)
+                l1_w = (err * weights).mean()            # class-balanced L1, trained on
                 dom = 0.0
                 for c in CLF_STAGES:
                     d, acc = domain_loss(clfs[str(c)](stage[c], lam), n_sim, rows_ok)
                     dom = dom + d
                     s_acc[c] += acc
-                loss = l1 + dom
+                loss = l1_w + dom
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
             scaler.step(opt)
@@ -510,6 +525,106 @@ def check_d1():
     print(f"written: {path}")
 
 
+DETECTOR_PIX_MM = 0.139                       # D1 and D2 images: full-detector pixel size
+MAGNIFICATION = augment.SID_MM / augment.SPD_MM  # ~1.54 at the vine centre (approximate)
+
+
+def total_vs_width(total, mask, min_px=20):
+    """Sanity check of the predicted amounts: in each image row, the longest run
+    of vine pixels is taken as the trunk width (mm, corrected for magnification)
+    and compared with the largest total thickness (3 tissues) in that run. A
+    round trunk gives about 1 at its centre. Returns the median over the rows."""
+    ratios = []
+    for r in np.nonzero(mask.any(1))[0]:
+        m = np.concatenate(([0], mask[r].astype(np.int8), [0]))
+        edges = np.flatnonzero(np.diff(m))
+        starts, ends = edges[::2], edges[1::2]
+        k = int(np.argmax(ends - starts))
+        a, b = starts[k], ends[k]
+        if b - a < min_px:
+            continue
+        width_mm = (b - a) * DETECTOR_PIX_MM / MAGNIFICATION
+        ratios.append(float(total[r, a:b].max()) / width_mm)
+    return float(np.median(ratios)) if ratios else float("nan")
+
+
+def d2_width_reference():
+    """The same ratio on the TRUE D2 thickness maps: what a correct prediction
+    gives, since trunks are not perfect cylinders (and bark is not labelled)."""
+    vals = []
+    for s, d, l in tb.list_pairs(tb.list_specimens()):
+        _, lab = tb.load_pair(d, l)
+        tot = lab.sum(0)
+        vals.append(total_vs_width(tot, tot > 0.5))
+    return float(np.median(vals))
+
+
+@torch.no_grad()
+def angle_maps(v, run_dir, yaws=(0, 30, 60, 90)):
+    """One figure: the stored views of a vine closest to these yaws (preferring
+    small pitch and roll), each with its predicted thickness maps, so the same
+    tissue can be followed from angle to angle."""
+    import make_views
+    models = sorted(glob.glob(os.path.join(run_dir, "fold_*", "model.pt")))
+    if not models:
+        raise SystemExit(f"No fold_*/model.pt in {run_dir}")
+    models = [tb.load_model(mp).eval() for mp in models]
+    root = make_views.D1_VIEWS_DIR
+    with open(os.path.join(root, "soil_rows.csv")) as f:
+        soil = {int(r["view"]): (int(r["soil_row"]) if r["soil_row"] else None)
+                for r in csv.DictReader(f) if r["vine"] == f"CEP_{v}"}
+    views = []
+    for ip in sorted(glob.glob(os.path.join(root, f"CEP_{v}", "*_img.npy"))):
+        k = int(os.path.basename(ip).split("_")[0])
+        views.append((k, ip, augment.sample_params(make_views.D1.seed(v, k))))
+    if not views:
+        raise SystemExit(f"No stored views for CEP_{v} in {root}")
+
+    def pick(target):
+        def cost(x):
+            p = x[2]
+            d = abs((p["yaw"] - target + 180) % 360 - 180)
+            return d + 2 * (abs(p["pitch"]) + abs(p["roll"]))
+        return min(views, key=cost)
+
+    chosen = [pick(t) for t in yaws]
+    names = {"healthy": "Healthy", "necrosis": "Necrosis", "white_rot": "White rot"}
+    plt = tb._plt()
+    fig = plt.figure(figsize=(5 * len(chosen), 21), layout="constrained")
+    gs = fig.add_gridspec(5, len(chosen), height_ratios=[1, 1, 1, 1, 0.06])
+    fig.suptitle(f"CEP_{v} (held out): the same vine from {len(chosen)} angles",
+                 fontsize=20, fontweight="bold")
+    for j, (k, ip, p) in enumerate(chosen):
+        img = np.load(ip).astype(np.float32) / 65535.0
+        mask = vine_mask(img) & above_soil(img.shape, soil.get(k))
+        pred = np.mean([tb.predict_full(m, img) for m in models], 0)
+        ry, rx = tb.vine_crop(mask[None].astype(np.float32))
+        tot = max(sum(float(pred[c][mask].sum()) for c in range(3)), 1e-6)
+        a = fig.add_subplot(gs[0, j])
+        a.imshow(img[ry, rx], cmap="gray", vmin=0, vmax=1)
+        a.set_title(f"yaw {p['yaw']:.0f}°  (pitch {p['pitch']:+.0f}°, roll {p['roll']:+.0f}°)\n"
+                    f"view {k}", fontsize=14)
+        a.set_xticks([]); a.set_yticks([])
+        for c, n in enumerate(tb.CLASSES):
+            a = fig.add_subplot(gs[1 + c, j])
+            im = a.imshow(np.where(mask, pred[c], 0)[ry, rx], cmap="magma",
+                          vmin=0, vmax=D1_THICK_VMAX_MM)
+            share = 100 * float(pred[c][mask].sum()) / tot
+            a.text(0.03, 0.97, f"{share:.0f}% of the wood", transform=a.transAxes, fontsize=13,
+                   va="top", color="white")
+            a.set_xticks([]); a.set_yticks([])
+            if j == 0:
+                a.set_ylabel(names[n], fontsize=18, fontweight="bold", color=tb.TISSUE_COLORS[c])
+    cb = fig.colorbar(im, cax=fig.add_subplot(gs[4, :]), orientation="horizontal", extend="max")
+    cb.set_label("predicted thickness (mm)", fontsize=14)
+    out = os.path.join(DA_ROOT, f"angles_CEP_{v}_" + os.path.basename(os.path.normpath(run_dir)))
+    os.makedirs(out, exist_ok=True)
+    path = os.path.join(out, "angle_maps.png")
+    fig.savefig(path, dpi=80, bbox_inches="tight")
+    plt.close(fig)
+    print(f"views {[k for k, _, _ in chosen]} -> {path}")
+
+
 @torch.no_grad()
 def eval_d1(run_dir):
     """For each held-out D1 vine: predict on the registered DRR and on its PXR
@@ -519,6 +634,8 @@ def eval_d1(run_dir):
     models = sorted(glob.glob(os.path.join(run_dir, "fold_*", "model.pt")))
     if not models:
         raise SystemExit(f"No fold_*/model.pt in {run_dir}")
+    ref = d2_width_reference()
+    print(f"  total thickness / trunk width on the TRUE D2 maps (reference): {ref:.2f}")
     out = os.path.join(DA_ROOT, "d1_agreement_" + os.path.basename(os.path.normpath(run_dir)))
     os.makedirs(out, exist_ok=True)
     rows = []
@@ -534,22 +651,26 @@ def eval_d1(run_dir):
             p_d.append(tb.predict_full(m, drr)); p_p.append(tb.predict_full(m, pxr))
         p_d, p_p = np.mean(p_d, 0), np.mean(p_p, 0)          # mean of the fold models
         row = {"vine": v}
+        row["total_vs_width_drr"] = total_vs_width(p_d.sum(0), mask)
+        row["total_vs_width_pxr"] = total_vs_width(p_p.sum(0), mask)
         tot_d, tot_p = p_d[:, mask].sum(), p_p[:, mask].sum()
         for c, name in enumerate(tb.CLASSES):
             row[f"{name}_mean_abs_diff_mm"] = float(np.abs(p_d[c] - p_p[c])[mask].mean())
             row[f"{name}_share_on_drr_pct"] = float(100 * p_d[c][mask].sum() / max(tot_d, 1e-6))
             row[f"{name}_share_on_pxr_pct"] = float(100 * p_p[c][mask].sum() / max(tot_p, 1e-6))
         rows.append(row)
-        save_d1_figure(v, drr, pxr, p_d, p_p, mask, row, os.path.join(out, f"CEP_{v}.png"))
+        save_d1_figure(v, drr, pxr, p_d, p_p, mask, row, os.path.join(out, f"CEP_{v}.png"), ref)
         print(f"  CEP_{v}: " + "  ".join(
             f"{n} |diff| {row[f'{n}_mean_abs_diff_mm']:.1f} mm, share DRR/PXR "
             f"{row[f'{n}_share_on_drr_pct']:.0f}/{row[f'{n}_share_on_pxr_pct']:.0f}%"
-            for n in tb.CLASSES))
+            for n in tb.CLASSES)
+            + f"  total/width DRR {row['total_vs_width_drr']:.2f} PXR {row['total_vs_width_pxr']:.2f}")
     mean = {"vine": "MEAN"}
     for k in rows[0]:
         if k != "vine":
             mean[k] = float(np.mean([r[k] for r in rows]))
     rows.append(mean)
+    rows.append({k: (ref if k.startswith("total_vs_width") else "") for k in rows[0]} | {"vine": "D2_TRUE_REFERENCE"})
     with open(os.path.join(out, "d1_agreement.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0])); w.writeheader()
         for r in rows:
@@ -557,7 +678,10 @@ def eval_d1(run_dir):
     print(f"{len(models)} fold models, mean prediction. Written to {out}/")
 
 
-def save_d1_figure(v, drr, pxr, p_d, p_p, mask, row, path):
+D1_THICK_VMAX_MM = 60         # colour scale of the D1 thickness maps (D1 values are lower than D2)
+
+
+def save_d1_figure(v, drr, pxr, p_d, p_p, mask, row, path, ref=None):
     plt = tb._plt()
     names = {"healthy": "Healthy", "necrosis": "Necrosis", "white_rot": "White rot"}
     ry, rx = tb.vine_crop(mask[None].astype(np.float32))
@@ -570,8 +694,8 @@ def save_d1_figure(v, drr, pxr, p_d, p_p, mask, row, path):
         a.set_title(t, fontsize=14); a.set_xticks([]); a.set_yticks([])
     for c, name in enumerate(tb.CLASSES):
         a1 = fig.add_subplot(gs[c, 1]); a2 = fig.add_subplot(gs[c, 2]); a3 = fig.add_subplot(gs[c, 3])
-        im_t = a1.imshow(p_d[c][ry, rx], cmap="magma", vmin=0, vmax=tb.THICK_VMAX_MM)
-        a2.imshow(p_p[c][ry, rx], cmap="magma", vmin=0, vmax=tb.THICK_VMAX_MM)
+        im_t = a1.imshow(p_d[c][ry, rx], cmap="magma", vmin=0, vmax=D1_THICK_VMAX_MM)
+        a2.imshow(p_p[c][ry, rx], cmap="magma", vmin=0, vmax=D1_THICK_VMAX_MM)
         im_e = a3.imshow(np.where(mask, p_p[c] - p_d[c], np.nan)[ry, rx], cmap="RdBu_r",
                          vmin=-tb.ERR_VMAX_MM, vmax=tb.ERR_VMAX_MM)
         a3.text(0.03, 0.97, f"mean |diff| {row[f'{name}_mean_abs_diff_mm']:.1f} mm",
@@ -583,10 +707,14 @@ def save_d1_figure(v, drr, pxr, p_d, p_p, mask, row, path):
             if c == 0:
                 a.set_title(t, fontsize=14)
     a = fig.add_subplot(gs[2, 0]); a.axis("off")
-    a.text(0, 1, "\n".join(f"{names[n]}: share {row[f'{n}_share_on_drr_pct']:.0f}% (DRR) vs "
-                           f"{row[f'{n}_share_on_pxr_pct']:.0f}% (PXR)" for n in tb.CLASSES)
-           + "\n\nAgreement between the two inputs,\nnot accuracy (no ground truth on D1).",
-           fontsize=13, va="top", transform=a.transAxes)
+    txt = "\n".join(f"{names[n]}: share {row[f'{n}_share_on_drr_pct']:.0f}% (DRR) vs "
+                    f"{row[f'{n}_share_on_pxr_pct']:.0f}% (PXR)" for n in tb.CLASSES)
+    txt += (f"\n\nTotal thickness / trunk width:\n  DRR {row['total_vs_width_drr']:.2f},  "
+            f"PXR {row['total_vs_width_pxr']:.2f}")
+    if ref is not None:
+        txt += f"\n  true D2 maps: {ref:.2f} (reference)"
+    txt += "\n\nAgreement between the two inputs,\nnot accuracy (no ground truth on D1)."
+    a.text(0, 1, txt, fontsize=13, va="top", transform=a.transAxes)
     cb = fig.colorbar(im_t, cax=fig.add_subplot(gs[3, 1:3]), orientation="horizontal", extend="max")
     cb.set_label("thickness (mm)", fontsize=13)
     cb = fig.colorbar(im_e, cax=fig.add_subplot(gs[3, 3]), orientation="horizontal", extend="both")
@@ -607,6 +735,8 @@ def main():
     ap.add_argument("--check-d1", action="store_true", help="figure of the inputs, no training")
     ap.add_argument("--eval-d1", action="store_true", help="agreement on the held-out D1 vines")
     ap.add_argument("--run-dir", help="with --eval-d1: another results folder (default: this lambda)")
+    ap.add_argument("--angle-maps", metavar="VINE",
+                    help="predicted maps of one D1 vine at yaw 0, 30, 60 and 90 degrees")
     args = ap.parse_args()
 
     tb.OUT_DIR = out_dir(args.lambda_max)
@@ -619,6 +749,8 @@ def main():
         check_d1(); return
     if args.eval_d1:
         eval_d1(args.run_dir or tb.OUT_DIR); return
+    if args.angle_maps:
+        angle_maps(args.angle_maps, args.run_dir or tb.OUT_DIR); return
     if args.summarize:
         tb.summarize(); return
     if args.replot:

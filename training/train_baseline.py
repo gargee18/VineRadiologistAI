@@ -79,7 +79,7 @@ import segmentation_models_pytorch as smp
 # PATHS  (fill these in)
 # =========================================================================
 
-REPO = "/mnt/41d6c007-0c9e-41e2-b2eb-8d9c032e9e53/gargee/code_python/VineRadiologistAI"
+REPO = os.environ.get("VRAI_REPO", "/mnt/41d6c007-0c9e-41e2-b2eb-8d9c032e9e53/gargee/code_python/VineRadiologistAI")
 
 DRR_ROOT = os.path.join(REPO, "results", "d2_cropped_drr")
 # The D2 DRRs, flat:  <SPECIMEN>_k6.5_mapped_norm.tif, e.g.
@@ -104,7 +104,7 @@ AUG_VIEWS_PER_VINE = 5   # augmented views made per training vine, per set
 AUG_CROP_MARGIN = 256    # views are kept cropped to the vine + this margin (px)
 
 # ---- stored views (only with --stored; see training/make_views.py) --------
-VIEWS_DIR = "/mnt/e823c70f-4136-47c9-91be-1ca7901a37b5/gargee/d2_views"   # other disk, ~83 GB
+VIEWS_DIR = os.environ.get("VRAI_VIEWS", "/mnt/e823c70f-4136-47c9-91be-1ca7901a37b5/gargee/d2_views")   # other disk, ~83 GB
 OUT_DIR_STORED = os.path.join(REPO, "results", "training_stored")
 # ---- class balancing (only with --balance, which needs --stored) ----------
 OUT_DIR_BALANCED = os.path.join(REPO, "results", "training_stored_balanced")
