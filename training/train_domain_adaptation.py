@@ -77,6 +77,8 @@ N_D1_PXR = 8                 # PXR patches per step
 D1_HELD_OUT_N = 5
 D1_SPLIT_SEED = 0
 FG_POINTS = 20000            # vine pixels kept per D1 image for patch centring
+D2_VIEWS_PER_VINE = None     # plateau check (--views-per-vine N): only N stored D2
+                             # views per vine (0 = the original views only); None = all 100
 USE_D1_VIEWS = True          # also train on the stored augmented D1 DRRs
                              # (make_views.py --d1, then --d1 --soil)
 CLF_STAGES = (1024, 2048)    # encoder stages the classifiers look at (channels)
@@ -134,6 +136,8 @@ def out_dir(lam, method="adversarial"):
         return os.path.join(DA_ROOT, f"mmd{MMD_WEIGHT:g}{tag}_bal")
     tag += "_d1aug" if USE_D1_VIEWS else ""
     tag += "_bal"                                   # class balancing, always on
+    if D2_VIEWS_PER_VINE is not None:
+        tag += f"_v{D2_VIEWS_PER_VINE}"             # plateau check
     return os.path.join(DA_ROOT, f"lam{lam:g}{tag}")
 
 
@@ -515,7 +519,8 @@ def run_fold(test_specimens, all_specimens, lam_max, method="adversarial"):
     weights = torch.tensor(w, dtype=torch.float32, device=tb.DEVICE).view(1, -1, 1, 1)
     tb._WR_PROB = tb.BALANCE_WR_PROB
     d2_data = [(img, lab, None, tb.white_rot_points(lab, i)) for i, (img, lab) in enumerate(originals)]
-    d2_data += tb.load_stored_views(train_specimens, with_wr=True)
+    if D2_VIEWS_PER_VINE != 0:
+        d2_data += tb.load_stored_views(train_specimens, with_wr=True, max_per_vine=D2_VIEWS_PER_VINE)
     d2_batches = tb.batch_iter(d2_data, flip_lr=tb.FLIP_LR)
     info = {"mean_thickness_mm": dict(zip(tb.CLASSES, mean.round(3).tolist())),
             "loss_weight": dict(zip(tb.CLASSES, w.round(3).tolist())),
@@ -906,6 +911,8 @@ def save_d1_figure(v, drr, pxr, p_d, p_p, mask, row, path, ref=None):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--lambda-max", type=float, default=LAMBDA_MAX)
+    ap.add_argument("--views-per-vine", type=int, default=None,
+                    help="plateau check: only N stored D2 views per vine (0 = originals only)")
     ap.add_argument("--method", choices=["adversarial", "contrastive", "mmd"], default="adversarial",
                     help="domain adaptation: domain classifier (default), DRR/PXR contrastive "
                          "pairs, or MMD between simulated and real features")
@@ -920,6 +927,8 @@ def main():
                     help="predicted maps of one D1 vine at yaw 0, 30, 60 and 90 degrees")
     args = ap.parse_args()
 
+    global D2_VIEWS_PER_VINE
+    D2_VIEWS_PER_VINE = args.views_per_vine
     tb.OUT_DIR = out_dir(args.lambda_max, args.method)
     os.makedirs(tb.OUT_DIR, exist_ok=True)
     train, held = d1_split()

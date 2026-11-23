@@ -28,12 +28,15 @@ RUNS = [   # (name in the table, results folder)
     ("DA, soil ignored + D1 augmentation", "results/domain_adaptation/lam0.3_soil_d1aug"),
     ("same, λ 0.1", "results/domain_adaptation/lam0.1_soil_d1aug"),
     ("same, λ 1", "results/domain_adaptation/lam1_soil_d1aug"),
+    ("DA adversarial + balancing", "results/domain_adaptation/lam0.3_soil_d1aug_bal"),
+    ("DA contrastive + balancing", "results/domain_adaptation/contrast0.3_soil_bal"),
+    ("DA MMD + balancing", "results/domain_adaptation/mmd0.3_soil_d1aug_bal"),
 ]
 TISSUES = [("healthy", "Healthy"), ("necrosis", "Necrosis"), ("white_rot", "White rot")]
 OUT_DIR = os.path.join(REPO, "results", "comparison")      # created if missing
 OUT = os.path.join(OUT_DIR, "compare_runs.csv")
 TISSUE_COLORS = ["#1B5E20", "#F9A825", "#B71C1C"]   # same as train_baseline.py
-RUN_COLORS = ["#E3E7EB", "#CAD2DA", "#B1BCC8", "#98A6B5", "#7F90A3", "#667B91", "#4E657E", "#36506B", "#1F2F40"]  # light = first run, dark = latest
+RUN_COLORS = ["#E8EBEE", "#D3D9DF", "#BEC6CF", "#A9B4C0", "#94A2B1", "#7F90A2", "#6A7E93", "#566C84", "#435A75", "#304866", "#1F3346", "#101C28"]  # light = first run, dark = latest
 GROUP_COLORS = {"asymptomatic": "#1baf7a", "resistant": "#2a78d6",   # same as train_baseline.py
                 "symptomatic": "#eb6834", "apoplectic": "#7a3fa0"}
 
@@ -108,33 +111,40 @@ def plot(rows, path_scores, path_comp):
     tissues = [label for _, label in TISSUES]
     get = lambda run, tis, key: next(r[key] for r in rows if r["run"] == run and r["tissue"] == tis)
 
-    fig, ax = plt.subplots(1, 3, figsize=(19, 7), layout="constrained")
-    fig.suptitle("Test scores of the training runs, 12 test vines", fontsize=19, fontweight="bold")
-    panels = [("MAE_mm", "MAE (mm)", "%.1f"),
-              ("Dice", "Dice", "%.2f"),
-              ("share_error_pp", "Error in share of the wood\n(percentage points)", "%.1f")]
-    x = range(len(tissues)); w = 0.8 / len(runs)
-    for a, (key, title, fmt) in zip(ax, panels):
-        for k, run in enumerate(runs):
-            vals = [get(run, t, key) for t in tissues]
-            bars = a.bar([i + (k - (len(runs) - 1) / 2) * w for i in x], vals, w,
-                         color=RUN_COLORS[k], label=run)
-            a.bar_label(bars, [fmt % v for v in vals], fontsize=10, padding=2)
-        a.set_xticks(list(x)); a.set_xticklabels(tissues, fontsize=14, fontweight="bold")
-        for lab, c in zip(a.get_xticklabels(), TISSUE_COLORS):
-            lab.set_color(c)
-        a.set_title(title, fontsize=15); a.tick_params(axis="y", labelsize=12)
-        a.grid(axis="y", alpha=0.3); a.set_axisbelow(True)
-        for sp in ("top", "right"):
-            a.spines[sp].set_visible(False)
-        a.margins(y=0.12)
-    ax[1].set_ylim(0, 1.08)
-    h, l = ax[0].get_legend_handles_labels()
-    try:
-        fig.legend(h, l, loc="outside lower center", ncol=len(runs), fontsize=14, frameon=False)
-    except ValueError:
-        ax[0].legend(h, l, fontsize=12)
-    fig.savefig(path_scores, dpi=110)
+    # one panel per metric (rows) and tissue (columns), horizontal bars, run names once
+    panels = [("MAE_mm", "MAE (mm)", "%.2f", min),
+              ("Dice", "Dice", "%.2f", max),
+              ("share_error_pp", "error in share of the wood (pp)", "%.1f", min)]
+    n = len(runs)
+    fig, ax = plt.subplots(3, 3, figsize=(20, 3 * (1.2 + 0.32 * n)), layout="constrained",
+                           sharey=True)
+    fig.suptitle(f"Test scores of the training runs, 12 test vines (best value of each panel in bold)",
+                 fontsize=19, fontweight="bold")
+    y = list(range(n))
+    for r, (key, title, fmt, best) in enumerate(panels):
+        for c, tis in enumerate(tissues):
+            a = ax[r, c]
+            vals = [get(run, tis, key) for run in runs]
+            a.barh(y, vals, color=[RUN_COLORS[k % len(RUN_COLORS)] for k in range(n)],
+                   edgecolor="#9AA5B1", linewidth=0.6, height=0.75)
+            b = best(vals)
+            for k, v in enumerate(vals):
+                a.text(v, k, " " + fmt % v, va="center", fontsize=11,
+                       fontweight="bold" if v == b else "normal")
+            lo = 0.6 if key == "Dice" else 0
+            a.set_xlim(lo, max(vals) * 1.18 if key != "Dice" else 1.0)
+            if r == 0:
+                a.set_title(tis, fontsize=17, fontweight="bold", color=TISSUE_COLORS[c])
+            a.set_xlabel(title, fontsize=12)
+            a.tick_params(axis="x", labelsize=11)
+            a.grid(axis="x", alpha=0.3); a.set_axisbelow(True)
+            for sp in ("top", "right"):
+                a.spines[sp].set_visible(False)
+    ax[0, 0].set_yticks(y)
+    ax[0, 0].invert_yaxis()
+    for r in range(3):
+        ax[r, 0].set_yticklabels(runs, fontsize=12)
+    fig.savefig(path_scores, dpi=100)
     plt.close(fig)
 
     # composition: true, then each run, stacked shares

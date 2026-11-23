@@ -93,6 +93,9 @@ DESCRIPTIONS = {
     "lam0.3_soil_d1aug": "Domain adaptation (λ = 0.3), soil ignored, stored D2 + D1 views + flip",
     "lam0.1_soil_d1aug": "Domain adaptation (λ = 0.1), soil ignored, stored D2 + D1 views + flip",
     "lam1_soil_d1aug": "Domain adaptation (λ = 1), soil ignored, stored D2 + D1 views + flip",
+    "lam0.3_soil_d1aug_bal": "Adversarial DA (λ = 0.3), soil ignored, D2 + D1 views, class balancing",
+    "contrast0.3_soil_bal": "Contrastive DA (DRR/PXR pairs), soil ignored, D2 views, class balancing",
+    "mmd0.3_soil_d1aug_bal": "MMD DA, soil ignored, D2 + D1 views, class balancing",
 }
 
 

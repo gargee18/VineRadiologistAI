@@ -16,10 +16,11 @@
 set -eo pipefail
 METHOD=$1
 STEP=$2
+EXTRA="${@:3}"                            # optional extra options, e.g. --views-per-vine 25
 
 module purge
 module load arch/h100                     # needed for the H100 partition on Jean Zay
-module load pytorch-gpu/py3/2.3.0         # CHECK: module avail pytorch-gpu
+module load pytorch-gpu/py3/2.13.0
 source $WORK/vrai_env/bin/activate        # venv made with --system-site-packages
 
 export VRAI_REPO=$WORK/VineRadiologistAI
@@ -35,10 +36,10 @@ FOLDS=(
 )
 
 if [ "$STEP" = "train" ]; then
-  python -u training/train_domain_adaptation.py --method "$METHOD" \
+  python -u training/train_domain_adaptation.py --method "$METHOD" $EXTRA \
       --test ${FOLDS[$SLURM_ARRAY_TASK_ID]}
 else
   for s in --summarize --replot --eval-d1; do
-    python -u training/train_domain_adaptation.py $s --method "$METHOD"
+    python -u training/train_domain_adaptation.py $s --method "$METHOD" $EXTRA
   done
 fi

@@ -928,10 +928,12 @@ def make_augmented_set(train_specimens, round_idx, fold_dir, epoch):
     return views
 
 
-def load_stored_views(train_specimens, with_wr=False):
+def load_stored_views(train_specimens, with_wr=False, max_per_vine=None):
     """Stored views of the TRAINING vines only, memory-mapped (read from disk
     patch by patch). Made by training/make_views.py. with_wr (--balance): also
-    the white rot pixels of each view, computed once and cached as *_wr.npy."""
+    the white rot pixels of each view, computed once and cached as *_wr.npy.
+    max_per_vine: only the first N views of each vine (random poses, so a random
+    subset), for the plateau check."""
     import time
     t0 = time.perf_counter()
     views = []
@@ -939,6 +941,8 @@ def load_stored_views(train_specimens, with_wr=False):
         imgs = sorted(glob.glob(os.path.join(VIEWS_DIR, s, "*_img.npy")))
         if not imgs:
             raise SystemExit(f"No stored views for {s} in {VIEWS_DIR}: run make_views.py first")
+        if max_per_vine is not None:
+            imgs = imgs[:max_per_vine]
         for ip in imgs:
             img = np.load(ip, mmap_mode="r")
             lab = np.load(ip.replace("_img.npy", "_lab.npy"), mmap_mode="r")
