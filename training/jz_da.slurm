@@ -10,7 +10,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=10
 #SBATCH --hint=nomultithread
-#SBATCH --time=10:00:00
+#SBATCH --time=12:00:00
 #SBATCH --output=logs/%x_%A_%a.out
 
 set -eo pipefail
@@ -35,7 +35,9 @@ FOLDS=(
   "CEP013_AS3 CEP016_RES3 CEP019_S3 CEP022_APO3"
 )
 
-if [ "$STEP" = "train" ]; then
+if [ "$STEP" = "pretrain" ]; then
+  python -u training/pretrain_masked.py
+elif [ "$STEP" = "train" ]; then
   python -u training/train_domain_adaptation.py --method "$METHOD" $EXTRA \
       --test ${FOLDS[$SLURM_ARRAY_TASK_ID]}
 else

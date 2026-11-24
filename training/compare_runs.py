@@ -11,7 +11,8 @@ USAGE (from the repo root, after --summarize and --replot of every run)
     python training/compare_runs.py
 Writes results/comparison/compare_runs.csv, compare_runs_scores.png,
 compare_runs_composition.png and compare_runs_composition_per_vine.png,
-prints the table.
+prints the table. If the plateau runs exist (--views-per-vine 0/10/25/50),
+also compare_runs_plateau.png and a small table.
 """
 
 import csv
@@ -32,6 +33,13 @@ RUNS = [   # (name in the table, results folder)
     ("DA contrastive + balancing", "results/domain_adaptation/contrast0.3_soil_bal"),
     ("DA MMD + balancing", "results/domain_adaptation/mmd0.3_soil_d1aug_bal"),
 ]
+# plateau check: the same model (adversarial DA + class balancing) with N stored
+# D2 views per vine; 100 is the full run above
+PLATEAU = [(0, "results/domain_adaptation/lam0.3_soil_d1aug_bal_v0"),
+           (10, "results/domain_adaptation/lam0.3_soil_d1aug_bal_v10"),
+           (25, "results/domain_adaptation/lam0.3_soil_d1aug_bal_v25"),
+           (50, "results/domain_adaptation/lam0.3_soil_d1aug_bal_v50"),
+           (100, "results/domain_adaptation/lam0.3_soil_d1aug_bal")]
 TISSUES = [("healthy", "Healthy"), ("necrosis", "Necrosis"), ("white_rot", "White rot")]
 OUT_DIR = os.path.join(REPO, "results", "comparison")      # created if missing
 OUT = os.path.join(OUT_DIR, "compare_runs.csv")
@@ -186,32 +194,107 @@ def read_csv(path):
         return list(csv.DictReader(f))
 
 
+def run_rows(name, folder):
+    """One row per tissue for a run folder, or None (and a message) if it has no results."""
+    d = os.path.join(REPO, folder)
+    if not (os.path.exists(os.path.join(d, "summary_per_group.csv"))
+            and os.path.exists(os.path.join(d, "volume_per_vine.csv"))):
+        print(f"skip '{name}': no results yet in {folder} (train it, then --replot and --summarize)")
+        return None, None
+    allrow = [r for r in read_csv(os.path.join(d, "summary_per_group.csv")) if r["group"] == "ALL"][0]
+    vol = read_csv(os.path.join(d, "volume_per_vine.csv"))
+    n = len(vol)
+    rows = []
+    for t, label in TISSUES:
+        tp = [float(v[f"{t}_true_share_pct"]) for v in vol]
+        pp = [float(v[f"{t}_pred_share_pct"]) for v in vol]
+        rows.append({
+            "run": name, "tissue": label, "n_vines": n,
+            "MAE_mm": float(allrow[f"{t}_mae_mm"]),
+            "Dice": float(allrow[f"{t}_dice"]),
+            "amount": float(allrow[f"{t}_amount_ratio"]),
+            "true_share_pct": sum(tp) / n,
+            "pred_share_pct": sum(pp) / n,
+            "share_error_pp": sum(abs(p - q) for p, q in zip(pp, tp)) / n,
+            "true_cm3": sum(float(v[f"{t}_true_cm3"]) for v in vol),
+            "pred_cm3": sum(float(v[f"{t}_pred_cm3"]) for v in vol),
+        })
+    return rows, vol
+
+
+def d1_agreement(folder):
+    """Mean |PXR - DRR| per tissue on the held-out D1 vines (row MEAN of
+    d1_agreement.csv, written by train_domain_adaptation.py --eval-d1), or None."""
+    p = os.path.join(REPO, os.path.dirname(folder),
+                     "d1_agreement_" + os.path.basename(folder), "d1_agreement.csv")
+    if not os.path.exists(p):
+        return None
+    mean = [r for r in read_csv(p) if r["vine"] == "MEAN"]
+    return {t: float(mean[0][f"{t}_mean_abs_diff_mm"]) for t, _ in TISSUES} if mean else None
+
+
+def plateau(path):
+    """Scores against the number of stored D2 views per vine (plateau check)."""
+    pts = []
+    for n_views, folder in PLATEAU:
+        rows, _ = run_rows(f"{n_views} views", folder)
+        if rows:
+            pts.append((n_views, rows, d1_agreement(folder)))
+    if len(pts) < 2:
+        print("plateau: fewer than 2 runs with results, no plot")
+        return
+    print("\nPlateau check (adversarial DA + class balancing), D2 test vines and held-out D1 vines")
+    print(f"{'views':>5s}  " + "  ".join(f"{lab:>22s}" for _, lab in TISSUES))
+    for n_views, rows, d1 in pts:
+        cells = []
+        for (t, lab), r in zip(TISSUES, rows):
+            a = f"{d1[t]:.1f}" if d1 else "-"
+            cells.append(f"MAE {r['MAE_mm']:5.2f}  share {r['share_error_pp']:4.1f}  D1 {a:>4s}")
+        print(f"{n_views:5d}  " + "  ".join(f"{c:>22s}" for c in cells))
+    print("MAE in mm and share error in pp on D2; D1 = mean |PXR - DRR| in mm on the held-out vines")
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    panels = [("MAE_mm", "D2 error (MAE, mm)"),
+              ("share_error_pp", "D2 error in share of the wood (pp)"),
+              ("d1", "real vs simulated, D1 held out\n(mean |PXR − DRR|, mm)")]
+    fig, ax = plt.subplots(3, 3, figsize=(16, 12), layout="constrained")
+    fig.suptitle("Plateau check: stored augmented views per D2 vine", fontsize=19, fontweight="bold")
+    x = [p[0] for p in pts]
+    for r, (key, title) in enumerate(panels):
+        for c, (t, lab) in enumerate(TISSUES):
+            a = ax[r, c]
+            if key == "d1":
+                y = [p[2][t] if p[2] else float("nan") for p in pts]
+            else:
+                y = [p[1][c][key] for p in pts]
+            a.plot(x, y, "-o", color=TISSUE_COLORS[c], lw=2.5, ms=8)
+            for xi, yi in zip(x, y):
+                if yi == yi:
+                    a.annotate(f"{yi:.2f}", (xi, yi), textcoords="offset points", xytext=(0, 9),
+                               ha="center", fontsize=11)
+            a.set_xticks(x)
+            a.set_xlabel("stored views per vine (0 = original view only)", fontsize=11)
+            a.set_ylabel(title, fontsize=12)
+            a.margins(y=0.2); a.grid(alpha=0.3)
+            for sp in ("top", "right"):
+                a.spines[sp].set_visible(False)
+            if r == 0:
+                a.set_title(lab, fontsize=17, fontweight="bold", color=TISSUE_COLORS[c])
+    fig.savefig(path, dpi=100)
+    plt.close(fig)
+    print(f"written: {path}")
+
+
 def main():
     rows, vols = [], {}
     for name, folder in RUNS:
-        d = os.path.join(REPO, folder)
-        if not (os.path.exists(os.path.join(d, "summary_per_group.csv"))
-                and os.path.exists(os.path.join(d, "volume_per_vine.csv"))):
-            print(f"skip '{name}': no results yet in {folder} (train it, then --replot and --summarize)")
+        rr, vol = run_rows(name, folder)
+        if rr is None:
             continue
-        allrow = [r for r in read_csv(os.path.join(d, "summary_per_group.csv")) if r["group"] == "ALL"][0]
-        vol = read_csv(os.path.join(d, "volume_per_vine.csv"))
+        rows += rr
         vols[name] = vol
-        n = len(vol)
-        for t, label in TISSUES:
-            tp = [float(v[f"{t}_true_share_pct"]) for v in vol]
-            pp = [float(v[f"{t}_pred_share_pct"]) for v in vol]
-            rows.append({
-                "run": name, "tissue": label, "n_vines": n,
-                "MAE_mm": float(allrow[f"{t}_mae_mm"]),
-                "Dice": float(allrow[f"{t}_dice"]),
-                "amount": float(allrow[f"{t}_amount_ratio"]),
-                "true_share_pct": sum(tp) / n,
-                "pred_share_pct": sum(pp) / n,
-                "share_error_pp": sum(abs(p - q) for p, q in zip(pp, tp)) / n,
-                "true_cm3": sum(float(v[f"{t}_true_cm3"]) for v in vol),
-                "pred_cm3": sum(float(v[f"{t}_pred_cm3"]) for v in vol),
-            })
 
     os.makedirs(OUT_DIR, exist_ok=True)
     with open(OUT, "w", newline="") as f:
@@ -238,6 +321,7 @@ def main():
     plot(rows, p1, p2)
     plot_per_vine(vols, p3)
     print(f"written: {OUT}, {p1}, {p2}, {p3}")
+    plateau(OUT.replace(".csv", "_plateau.png"))
 
 
 if __name__ == "__main__":

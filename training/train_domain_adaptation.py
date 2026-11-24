@@ -77,6 +77,8 @@ N_D1_PXR = 8                 # PXR patches per step
 D1_HELD_OUT_N = 5
 D1_SPLIT_SEED = 0
 FG_POINTS = 20000            # vine pixels kept per D1 image for patch centring
+INIT_ENCODER = None          # --init-encoder: start the encoder from these weights
+                             # (pretrain_masked.py) instead of ImageNet
 D2_VIEWS_PER_VINE = None     # plateau check (--views-per-vine N): only N stored D2
                              # views per vine (0 = the original views only); None = all 100
 USE_D1_VIEWS = True          # also train on the stored augmented D1 DRRs
@@ -129,6 +131,7 @@ def out_dir(lam, method="adversarial"):
     so a new run never overwrites the earlier results. Contrastive runs:
     contrast0.3_soil_bal (the stored D1 views are not used: they have no PXR)."""
     tag = "_soil" if os.path.exists(SOIL_CSV) else ""
+    tag += "" if augment.USE_CURVE else "_nocurve"  # VRAI_CURVE=0
     if method == "contrastive":
         return os.path.join(DA_ROOT, f"contrast{CONTRAST_WEIGHT:g}{tag}_bal")
     if method == "mmd":
@@ -138,6 +141,8 @@ def out_dir(lam, method="adversarial"):
     tag += "_bal"                                   # class balancing, always on
     if D2_VIEWS_PER_VINE is not None:
         tag += f"_v{D2_VIEWS_PER_VINE}"             # plateau check
+    if INIT_ENCODER:
+        tag += "_mim"                               # masked-pretrained encoder
     return os.path.join(DA_ROOT, f"lam{lam:g}{tag}")
 
 
@@ -542,6 +547,9 @@ def run_fold(test_specimens, all_specimens, lam_max, method="adversarial"):
               f"held out: {d1_held}")
 
     model = tb.build_model().to(tb.DEVICE)
+    if INIT_ENCODER:
+        model.encoder.load_state_dict(torch.load(INIT_ENCODER, map_location=tb.DEVICE))
+        print(f"  encoder initialised from {INIT_ENCODER}")
     check_split_forward(model)
     if method == "contrastive":
         clfs = nn.ModuleDict({"head": ProjectionHead()}).to(tb.DEVICE)
@@ -911,6 +919,8 @@ def save_d1_figure(v, drr, pxr, p_d, p_p, mask, row, path, ref=None):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--lambda-max", type=float, default=LAMBDA_MAX)
+    ap.add_argument("--init-encoder", default=None,
+                    help="encoder weights from pretrain_masked.py, instead of ImageNet")
     ap.add_argument("--views-per-vine", type=int, default=None,
                     help="plateau check: only N stored D2 views per vine (0 = originals only)")
     ap.add_argument("--method", choices=["adversarial", "contrastive", "mmd"], default="adversarial",
@@ -927,8 +937,9 @@ def main():
                     help="predicted maps of one D1 vine at yaw 0, 30, 60 and 90 degrees")
     args = ap.parse_args()
 
-    global D2_VIEWS_PER_VINE
+    global D2_VIEWS_PER_VINE, INIT_ENCODER
     D2_VIEWS_PER_VINE = args.views_per_vine
+    INIT_ENCODER = args.init_encoder
     tb.OUT_DIR = out_dir(args.lambda_max, args.method)
     os.makedirs(tb.OUT_DIR, exist_ok=True)
     train, held = d1_split()

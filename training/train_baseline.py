@@ -84,7 +84,8 @@ REPO = os.environ.get("VRAI_REPO", "/mnt/41d6c007-0c9e-41e2-b2eb-8d9c032e9e53/ga
 DRR_ROOT = os.path.join(REPO, "results", "d2_cropped_drr")
 # The D2 DRRs, flat:  <SPECIMEN>_k6.5_mapped_norm.tif, e.g.
 #   CEP011_AS1_k6.5_mapped_norm.tif       shape (H, W)
-DRR_SUFFIX = "_k6.5_mapped_norm.tif"
+DRR_SUFFIX = ("_k6.5_mapped_norm.tif" if os.environ.get("VRAI_CURVE", "1") != "0"
+              else "_k6.5.tif")              # VRAI_CURVE=0: the plain linear DRRs, no curve
 
 LABEL_ROOT = os.path.join(REPO, "results", "d2_cropped_labels")
 # Output of the projection loop, flat, 3 files per specimen, each (H, W), mm:
@@ -339,6 +340,10 @@ def metrics(pred, gt):
             "dice": float(2 * (pb & gb).sum() / denom) if denom else None,
             # summed thickness, predicted / true. 1.0 = right amount of tissue
             "amount_ratio": float(p.sum() / g.sum()) if g.sum() > 0 else None,
+            # % of all predicted thickness that lies OUTSIDE the true vine outline
+            # (background, pot): the other metrics never see it
+            "outside_pct": (float(100 * pred[c][~vine].sum() / pred[c].sum())
+                            if pred[c].sum() > 0 else None),
         }
     return out
 
@@ -347,8 +352,8 @@ def mean_metrics(per_image):
     out = {}
     for name in CLASSES:
         out[name] = {}
-        for k in ("mae_mm", "dice", "amount_ratio"):
-            vals = [m[name][k] for m in per_image if m[name][k] is not None]
+        for k in ("mae_mm", "dice", "amount_ratio", "outside_pct"):
+            vals = [m[name].get(k) for m in per_image if m[name].get(k) is not None]
             out[name][k] = float(np.mean(vals)) if vals else None
     return out
 
@@ -1073,13 +1078,13 @@ def summarize():
     vines = sorted(per_vine)
     print(f"{len(vines)} vines with test scores: {vines}")
 
-    keys = ("mae_mm", "dice", "amount_ratio")
+    keys = ("mae_mm", "dice", "amount_ratio", "outside_pct")
     fmt = lambda x: f"{x:.4f}" if x is not None else ""
     with open(os.path.join(OUT_DIR, "summary_per_vine.csv"), "w") as f:
         f.write("vine,group,fold," + ",".join(f"{c}_{k}" for c in CLASSES for k in keys) + "\n")
         for s in vines:
             f.write(f"{s},{group_of(s)},{source[s]}," + ",".join(
-                fmt(per_vine[s][c][k]) for c in CLASSES for k in keys) + "\n")
+                fmt(per_vine[s][c].get(k)) for c in CLASSES for k in keys) + "\n")
 
     groups = [g for g in GROUP_NAMES.values() if any(group_of(s) == g for s in vines)]
     groups += sorted({group_of(s) for s in vines} - set(groups))
@@ -1111,8 +1116,10 @@ def summarize():
     print("\n=== per group (mean over vines)")
     for g, n, r in zip(groups + ["ALL"], counts + [len(vines)], by_group + [overall]):
         print(f"  {g:13s} n={n}  " + "  ".join(
-            f"{c}: amount={r[c]['amount_ratio']:.2f}" if r[c]["amount_ratio"] is not None
-            else f"{c}: amount=n/a" for c in CLASSES))
+            (f"{c}: amount={r[c]['amount_ratio']:.2f}" if r[c]["amount_ratio"] is not None
+             else f"{c}: amount=n/a")
+            + (f" outside={r[c]['outside_pct']:.1f}%" if r[c].get("outside_pct") is not None else "")
+            for c in CLASSES))
     print(f"\nWritten to {OUT_DIR}: summary_per_vine.csv, summary_per_group.csv, "
           "summary_per_group.png, loss_curves_all.png")
 
