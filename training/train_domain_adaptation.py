@@ -97,6 +97,13 @@ PAIRS_PER_VINE = 2           # pairs from the same vine per step (different plac
 # patches, at the same stages as the domain classifier (as in DRR4Covid)
 MMD_WEIGHT = 0.3             # weight of the MMD loss, ramped up like lambda
 MMD_SCALES = (0.25, 0.5, 1.0, 2.0, 4.0)   # Gaussian kernels, x the median distance
+# --consistency W (with adversarial): the thickness predicted on a real PXR patch must
+# match the one predicted on the same window of its registered DRR (no labels needed).
+# The DRR side is the target (no gradient), so real predictions move towards simulated
+# ones and both cannot drift together. Compared after CONS_POOL x CONS_POOL average
+# pooling, to tolerate small registration errors. Training D1 vines only.
+CONSISTENCY = 0.0            # weight, ramped up like lambda; 0 = off
+CONS_POOL = 8                # pixels (8 x 0.139 mm = about 1.1 mm)
 STAGE_NAME = {1024: "stage3", 2048: "stage4"}
 FOLDS = [                    # same folds as the earlier runs
     ["CEP011_AS1", "CEP014_RES1", "CEP017_S1", "CEP020_APO1"],
@@ -143,6 +150,8 @@ def out_dir(lam, method="adversarial"):
         tag += f"_v{D2_VIEWS_PER_VINE}"             # plateau check
     if INIT_ENCODER:
         tag += "_mim"                               # masked-pretrained encoder
+    if CONSISTENCY:
+        tag += f"_cons{CONSISTENCY:g}"              # paired consistency
     return os.path.join(DA_ROOT, f"lam{lam:g}{tag}")
 
 
@@ -388,6 +397,16 @@ def pair_patches(pairs, n):
             torch.from_numpy(np.stack(rows_ok)))
 
 
+def consistency_loss(t_real, t_sim, rows_ok):
+    """Mean |thickness on PXR - thickness on its DRR| in mm, after CONS_POOL x
+    CONS_POOL average pooling, over the pooled rows fully above the soil."""
+    k = CONS_POOL
+    a, b = F.avg_pool2d(t_real.float(), k), F.avg_pool2d(t_sim.float(), k)
+    B, C, h, w = a.shape
+    m = rows_ok.view(B, h, k).all(-1).float()[:, None, :, None]          # (B, 1, h, 1)
+    return ((a - b).abs() * m).sum() / (m.sum() * C * w).clamp(min=1.0)
+
+
 def masked_pool(feat, rows_ok):
     """Average a (B, C, h, w) feature map over the rows above the soil -> (B, C)."""
     f = feat.float()
@@ -543,6 +562,10 @@ def run_fold(test_specimens, all_specimens, lam_max, method="adversarial"):
               f"held out: {d1_held}")
     else:
         d1_drr, d1_pxr = load_d1_train(d1_train)
+        if CONSISTENCY:
+            pairs = load_d1_pairs(d1_train)
+            print(f"  paired consistency, weight {CONSISTENCY:g}: {len(pairs)} registered "
+                  f"DRR/PXR pairs, pooled {CONS_POOL} px")
         print(f"  D1: {len(d1_drr)} DRRs + {len(d1_pxr)} PXRs from {len(d1_train)} vines; "
               f"held out: {d1_held}")
 
@@ -568,7 +591,7 @@ def run_fold(test_specimens, all_specimens, lam_max, method="adversarial"):
 
     for ep in range(tb.EPOCHS):
         model.train(); clfs.train()
-        s_l1 = s_dom = 0.0
+        s_l1 = s_dom = s_cons = 0.0
         s_acc = {c: 0.0 for c in CLF_STAGES}
         for _ in range(tb.STEPS_PER_EPOCH):
             x2, y2 = next(d2_batches)
@@ -603,22 +626,31 @@ def run_fold(test_specimens, all_specimens, lam_max, method="adversarial"):
                         d, acc = domain_loss(clfs[str(c)](stage[c], lam), n_sim, rows_ok)
                         dom = dom + d
                         s_acc[c] += acc
-                loss = l1_w + dom
+                cons, w_c = torch.zeros((), device=tb.DEVICE), 0.0
+                if CONSISTENCY:
+                    w_c = lambda_at(step, total_steps, CONSISTENCY)
+                    xd, xp, ok_c = pair_patches(pairs, N_PAIRS)
+                    with torch.no_grad():
+                        t_sim = tb.forward(model, xd.to(tb.DEVICE))
+                    t_real = tb.forward(model, xp.to(tb.DEVICE))
+                    cons = consistency_loss(t_real, t_sim, ok_c.to(tb.DEVICE))
+                loss = l1_w + dom + w_c * cons
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
-            s_l1 += l1.item(); s_dom += dom.item()
+            s_l1 += l1.item(); s_dom += dom.item(); s_cons += cons.item()
             step += 1
         sched.step()
         n = tb.STEPS_PER_EPOCH
-        row = {"epoch": ep + 1, "lambda": lam, "train_L1_mm": s_l1 / n, "domain_loss": s_dom / n}
+        row = {"epoch": ep + 1, "lambda": lam, "train_L1_mm": s_l1 / n, "domain_loss": s_dom / n,
+               "consistency_mm": s_cons / n}
         row.update({f"domain_acc_{STAGE_NAME[c]}": s_acc[c] / n for c in CLF_STAGES})
         log.append(row)
         print(f"  epoch {ep + 1:3d}/{tb.EPOCHS}  L1 {row['train_L1_mm']:.3f} mm  "
               f"domain {row['domain_loss']:.3f}  acc " +
               " ".join(f"{row[f'domain_acc_{STAGE_NAME[c]}']:.2f}" for c in CLF_STAGES) +
-              f"  lambda {lam:.3f}")
+              f"  lambda {lam:.3f}" + (f"  consistency {row['consistency_mm']:.3f} mm" if CONSISTENCY else ""))
 
     torch.save(model.state_dict(), os.path.join(fold_dir, "model.pt"))      # plain U-Net
     torch.save(clfs.state_dict(), os.path.join(fold_dir, "domain_classifiers.pt"))
@@ -870,6 +902,7 @@ def eval_d1(run_dir):
 
 
 D1_THICK_VMAX_MM = 60         # colour scale of the D1 thickness maps (D1 values are lower than D2)
+D1_DIFF_VMAX_MM = 10          # colour scale of PXR - DRR maps (mean |diff| is 1-4 mm; +-40 hid it)
 
 
 def save_d1_figure(v, drr, pxr, p_d, p_p, mask, row, path, ref=None):
@@ -888,7 +921,7 @@ def save_d1_figure(v, drr, pxr, p_d, p_p, mask, row, path, ref=None):
         im_t = a1.imshow(p_d[c][ry, rx], cmap="magma", vmin=0, vmax=D1_THICK_VMAX_MM)
         a2.imshow(p_p[c][ry, rx], cmap="magma", vmin=0, vmax=D1_THICK_VMAX_MM)
         im_e = a3.imshow(np.where(mask, p_p[c] - p_d[c], np.nan)[ry, rx], cmap="RdBu_r",
-                         vmin=-tb.ERR_VMAX_MM, vmax=tb.ERR_VMAX_MM)
+                         vmin=-D1_DIFF_VMAX_MM, vmax=D1_DIFF_VMAX_MM)
         a3.text(0.03, 0.97, f"mean |diff| {row[f'{name}_mean_abs_diff_mm']:.1f} mm",
                 transform=a3.transAxes, fontsize=12, va="top",
                 bbox=dict(fc="white", ec="none", alpha=0.8, pad=2))
@@ -919,6 +952,8 @@ def save_d1_figure(v, drr, pxr, p_d, p_p, mask, row, path, ref=None):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--lambda-max", type=float, default=LAMBDA_MAX)
+    ap.add_argument("--consistency", type=float, default=0.0,
+                    help="weight of the paired PXR/DRR consistency loss (adversarial only; 0 = off)")
     ap.add_argument("--init-encoder", default=None,
                     help="encoder weights from pretrain_masked.py, instead of ImageNet")
     ap.add_argument("--views-per-vine", type=int, default=None,
@@ -937,7 +972,10 @@ def main():
                     help="predicted maps of one D1 vine at yaw 0, 30, 60 and 90 degrees")
     args = ap.parse_args()
 
-    global D2_VIEWS_PER_VINE, INIT_ENCODER
+    global D2_VIEWS_PER_VINE, INIT_ENCODER, CONSISTENCY
+    CONSISTENCY = args.consistency
+    if CONSISTENCY and args.method != "adversarial":
+        raise SystemExit("--consistency works with --method adversarial only")
     D2_VIEWS_PER_VINE = args.views_per_vine
     INIT_ENCODER = args.init_encoder
     tb.OUT_DIR = out_dir(args.lambda_max, args.method)
