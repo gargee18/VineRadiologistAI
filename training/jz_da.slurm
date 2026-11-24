@@ -24,7 +24,8 @@ module load pytorch-gpu/py3/2.13.0
 source $WORK/vrai_env/bin/activate        # venv made with --system-site-packages
 
 export VRAI_REPO=$WORK/VineRadiologistAI
-export VRAI_VIEWS=$SCRATCH/vrai/d2_views  # d1_views must sit next to it: $SCRATCH/vrai/d1_views
+export VRAI_VIEWS=${VRAI_VIEWS:-$SCRATCH/vrai/d2_views}  # set VRAI_VIEWS before sbatch to use other views;
+                                          # d1_views must sit next to it: $SCRATCH/vrai/d1_views
 export HF_HUB_OFFLINE=1                   # GPU nodes have no internet: ResNet-50 weights come
                                           # from the cache filled once on the login node
 cd $VRAI_REPO
