@@ -68,7 +68,7 @@ MASK_TYPES = ["SAIN", "NECROSE", "AMADOU"]   # healthy, necrosis, white rot
 # False: plain linear DRR 1 - exp(-A), 16-bit quantized, scaled 0..1 (= *_k6.5.tif / 65535)
 # The training's test images must be made the same way: the matching file suffix
 # is DRR_SUFFIX below.
-USE_CURVE = True
+USE_CURVE = os.environ.get("VRAI_CURVE", "1") != "0"   # VRAI_CURVE=0: no DRR->PXR curve
 DRR_SUFFIX = "_k6.5_mapped_norm.tif" if USE_CURVE else "_k6.5.tif"
 
 # =========================================================================
@@ -406,4 +406,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main()    main()
