@@ -32,6 +32,8 @@ RUNS = [   # (name in the table, results folder)
     ("DA adversarial + balancing", "results/domain_adaptation/lam0.3_soil_d1aug_bal"),
     ("DA contrastive + balancing", "results/domain_adaptation/contrast0.3_soil_bal"),
     ("DA MMD + balancing", "results/domain_adaptation/mmd0.3_soil_d1aug_bal"),
+    ("DA adversarial + bal., masked pretraining", "results/jeanzay/domain_adaptation/lam0.3_soil_d1aug_bal_mim"),
+    ("DA adversarial + bal., no curve", "results/jeanzay/domain_adaptation/lam0.3_soil_nocurve_d1aug_bal"),
 ]
 # plateau check: the same model (adversarial DA + class balancing) with N stored
 # D2 views per vine; 100 is the full run above

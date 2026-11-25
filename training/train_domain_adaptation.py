@@ -70,7 +70,7 @@ import augment                       # noqa: E402
 # ---- settings -------------------------------------------------------------
 REPO = tb.REPO
 PXR_ROOT = os.path.join(REPO, "dataset", "radiograph_portable_2026_tif")
-D1_DRR_PATTERN = os.path.join(REPO, "results", "CEP_{v}_airzero_calibration_linear.tif")
+D1_DRR_PATTERN = os.path.join(REPO, "results", "d1_drr", "CEP_{v}_airzero_calibration_linear.tif")
 LAMBDA_MAX = 0.3
 N_D1_DRR = 8                 # D1 DRR patches per step (D2 patches: tb.BATCH)
 N_D1_PXR = 8                 # PXR patches per step
@@ -902,7 +902,7 @@ def eval_d1(run_dir):
 
 
 D1_THICK_VMAX_MM = 60         # colour scale of the D1 thickness maps (D1 values are lower than D2)
-D1_DIFF_VMAX_MM = 10          # colour scale of PXR - DRR maps (mean |diff| is 1-4 mm; +-40 hid it)
+D1_DIFF_VMAX_MM = 20          # colour scale of PXR - DRR maps (mean |diff| is 1-4 mm; +-40 hid it)
 
 
 def save_d1_figure(v, drr, pxr, p_d, p_p, mask, row, path, ref=None):
